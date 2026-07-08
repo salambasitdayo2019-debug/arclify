@@ -1,0 +1,19 @@
+{
+  "name": "arclify-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Backend for Arclify — hosts the Circle App Kit Swap endpoints for Arc Testnet.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@circle-fin/adapter-viem-v2": "^1.0.0",
+    "@circle-fin/app-kit": "^1.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
