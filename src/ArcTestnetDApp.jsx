@@ -6,7 +6,7 @@ import { ethers } from "ethers";
 /* ------------------------------------------------------------------ */
 
 const ARC_TESTNET = {
-  chainIdHex: "0x4CF152", // 5042002
+  chainIdHex: "0x4CEF52", // 5042002
   chainId: 5042002,
   chainName: "Arc Testnet",
   nativeCurrency: { name: "Arc", symbol: "ARC", decimals: 18 },
