@@ -9,9 +9,9 @@ const ARC_TESTNET = {
   chainIdHex: "0x4CEF52", // 5042002
   chainId: 5042002,
   chainName: "Arc Testnet",
-  nativeCurrency: { name: "Arc", symbol: "ARC", decimals: 18 },
+  nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 6 },
   rpcUrls: ["https://rpc.testnet.arc.network"],
-  blockExplorerUrls: ["https://testnet.arcscan.net"],
+  blockExplorerUrls: ["https://testnet.arcscan.app"],
 };
 
 const CONTRACTS = {
