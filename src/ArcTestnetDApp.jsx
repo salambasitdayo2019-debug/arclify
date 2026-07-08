@@ -446,7 +446,7 @@ function SwapPage({ wallet }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          chain: "Arc",
+          chain: "Arc_Testnet",
           tokenIn,
           tokenOut,
           amountIn,
@@ -479,7 +479,7 @@ function SwapPage({ wallet }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          chain: "Arc",
+          chain: "Arc_Testnet",
           tokenIn,
           tokenOut,
           amountIn,

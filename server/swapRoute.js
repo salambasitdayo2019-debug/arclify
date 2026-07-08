@@ -77,7 +77,7 @@ router.post("/swap", async (req, res) => {
 
     // Cross-chain swaps settle asynchronously — poll to a terminal state
     // before reporting back. Same-chain swaps are already terminal here.
-    const final = chain !== "Arc"
+    const final = chain !== "Arc_Testnet"
       ? await kit.waitForSwap({ result, kitKey: process.env.KIT_KEY })
       : result;
 
