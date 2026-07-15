@@ -29,6 +29,27 @@ const ERC20_ABI = [
 ];
 
 /* ------------------------------------------------------------------ */
+/*  NFT Lock contracts — deployed to Arc Testnet via Remix              */
+/* ------------------------------------------------------------------ */
+
+const NFT_CONTRACT_ADDRESS = "0x7A239844c124666d1f5fD1fCeecB3BFB0824049F";
+const NFT_LOCK_VAULT_ADDRESS = "0x11F202F8A2aE3784C0aE234da1FB405BF9FC4162";
+
+const NFT_ABI = [
+  "function mint() returns (uint256)",
+  "function approve(address to, uint256 tokenId)",
+  "function ownerOf(uint256 tokenId) view returns (address)",
+  "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+];
+
+const NFT_LOCK_ABI = [
+  "function lock(address nftContract, uint256 tokenId, uint256 unlockAt) returns (uint256)",
+  "function withdraw(uint256 lockId)",
+  "function getLock(uint256 lockId) view returns (address owner, address nftContract, uint256 tokenId, uint256 unlockAt, bool withdrawn, bool canWithdraw)",
+  "event Locked(uint256 indexed lockId, address indexed owner, address nftContract, uint256 tokenId, uint256 unlockAt)",
+];
+
+/* ------------------------------------------------------------------ */
 /*  LocalStorage-backed simulation layer                               */
 /*  (Dashboard / History / Leaderboard / NFT Lock / Bulk Transfer      */
 /*   still run on a local mock ledger — Circle App Kit has no          */
@@ -584,57 +605,192 @@ function SwapPage({ wallet }) {
 /*  Page: NFT Lock (simulated — no App Kit capability covers this)      */
 /* ------------------------------------------------------------------ */
 
-function NFTLockPage() {
-  const [locks, setLocks] = useState(() => readLS(LS_KEYS.nftLocks, []));
-  const [tokenId, setTokenId] = useState("");
-  const [duration, setDuration] = useState("7");
+// Local index of which lockIds belong to this browser, so we know which
+// on-chain locks to display. The contract itself is the source of truth
+// for status (owner, unlockAt, withdrawn) — this is just a lookup list.
+const LS_LOCK_IDS_KEY = "arc_nft_lock_ids";
+const LS_MINTED_KEY = "arc_nft_minted_ids";
 
-  const lockNft = () => {
-    if (!tokenId) return;
-    const next = [
-      {
-        id: crypto.randomUUID(),
-        tokenId,
-        lockedAt: Date.now(),
-        unlockAt: Date.now() + Number(duration) * 86400000,
-      },
-      ...locks,
-    ];
-    setLocks(next);
-    writeLS(LS_KEYS.nftLocks, next);
-    setTokenId("");
-  };
+function NFTLockPage({ wallet }) {
+  const [mintedIds, setMintedIds] = useState(() => readLS(LS_MINTED_KEY, []));
+  const [lockIds, setLockIds] = useState(() => readLS(LS_LOCK_IDS_KEY, []));
+  const [lockDetails, setLockDetails] = useState({});
+  const [duration, setDuration] = useState("7");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState(null);
+
+  const getContracts = useCallback(async () => {
+    const signer = await wallet.provider.getSigner();
+    const nft = new ethers.Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, signer);
+    const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, signer);
+    return { nft, vault };
+  }, [wallet.provider]);
+
+  // Pull live status for every lock this browser knows about
+  useEffect(() => {
+    async function loadLockDetails() {
+      if (!wallet.provider || lockIds.length === 0) return;
+      const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, wallet.provider);
+      const entries = await Promise.all(
+        lockIds.map(async (id) => {
+          try {
+            const l = await vault.getLock(id);
+            return [id, {
+              tokenId: l.tokenId.toString(),
+              unlockAt: Number(l.unlockAt) * 1000,
+              withdrawn: l.withdrawn,
+              canWithdraw: l.canWithdraw,
+            }];
+          } catch {
+            return [id, null];
+          }
+        })
+      );
+      setLockDetails(Object.fromEntries(entries));
+    }
+    loadLockDetails();
+  }, [wallet.provider, lockIds]);
+
+  const mintNft = useCallback(async () => {
+    if (!wallet.provider) {
+      setStatus({ tone: "bad", msg: "Connect your wallet first." });
+      return;
+    }
+    setBusy(true);
+    setStatus({ tone: "neutral", msg: "Confirm mint in wallet…" });
+    try {
+      const { nft } = await getContracts();
+      const tx = await nft.mint();
+      const receipt = await tx.wait();
+      const transferEvent = receipt.logs
+        .map((log) => { try { return nft.interface.parseLog(log); } catch { return null; } })
+        .find((parsed) => parsed?.name === "Transfer");
+      const newTokenId = transferEvent?.args?.tokenId?.toString();
+      const next = [newTokenId, ...mintedIds];
+      setMintedIds(next);
+      writeLS(LS_MINTED_KEY, next);
+      setStatus({ tone: "ok", msg: `Minted token #${newTokenId}` });
+    } catch (e) {
+      setStatus({ tone: "bad", msg: e.shortMessage || e.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [wallet.provider, mintedIds, getContracts]);
+
+  const lockNft = useCallback(async (tokenId) => {
+    setBusy(true);
+    setStatus({ tone: "neutral", msg: "Approving, then locking…" });
+    try {
+      const { nft, vault } = await getContracts();
+      const approveTx = await nft.approve(NFT_LOCK_VAULT_ADDRESS, tokenId);
+      await approveTx.wait();
+
+      const unlockAt = Math.floor(Date.now() / 1000) + Number(duration) * 86400;
+      const lockTx = await vault.lock(NFT_CONTRACT_ADDRESS, tokenId, unlockAt);
+      const receipt = await lockTx.wait();
+      const lockedEvent = receipt.logs
+        .map((log) => { try { return vault.interface.parseLog(log); } catch { return null; } })
+        .find((parsed) => parsed?.name === "Locked");
+      const newLockId = lockedEvent?.args?.lockId?.toString();
+
+      const nextLockIds = [newLockId, ...lockIds];
+      setLockIds(nextLockIds);
+      writeLS(LS_LOCK_IDS_KEY, nextLockIds);
+
+      const nextMinted = mintedIds.filter((id) => id !== tokenId);
+      setMintedIds(nextMinted);
+      writeLS(LS_MINTED_KEY, nextMinted);
+
+      setStatus({ tone: "ok", msg: `Locked token #${tokenId} until unlock time.` });
+    } catch (e) {
+      setStatus({ tone: "bad", msg: e.shortMessage || e.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [getContracts, duration, lockIds, mintedIds]);
+
+  const withdrawLock = useCallback(async (lockId) => {
+    setBusy(true);
+    setStatus({ tone: "neutral", msg: "Withdrawing…" });
+    try {
+      const { vault } = await getContracts();
+      const tx = await vault.withdraw(lockId);
+      await tx.wait();
+      setStatus({ tone: "ok", msg: `Withdrawn lock #${lockId}.` });
+      setLockDetails((prev) => ({ ...prev, [lockId]: { ...prev[lockId], withdrawn: true } }));
+    } catch (e) {
+      setStatus({ tone: "bad", msg: e.shortMessage || e.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [getContracts]);
 
   return (
     <GlassCard className="p-6 max-w-lg">
       <h2 className="text-white text-lg font-semibold mb-1">NFT Lock</h2>
-      <p className="text-white/40 text-xs mb-4">Simulated locally — no on-chain NFT-lock capability in App Kit.</p>
-      <div className="flex gap-2 mb-4">
-        <input
-          value={tokenId}
-          onChange={(e) => setTokenId(e.target.value)}
-          placeholder="Token ID"
-          className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
-        />
-        <select
-          value={duration}
-          onChange={(e) => setDuration(e.target.value)}
-          className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
-        >
-          <option value="7">7 days</option>
-          <option value="30">30 days</option>
-          <option value="90">90 days</option>
-        </select>
-        <PrimaryButton onClick={lockNft}>Lock</PrimaryButton>
-      </div>
-      <div className="space-y-2">
-        {locks.map((l) => (
-          <div key={l.id} className="flex justify-between text-sm text-white/70 border-t border-white/5 pt-2">
-            <span>#{l.tokenId}</span>
-            <span>{new Date(l.unlockAt).toLocaleDateString()}</span>
+      <p className="text-white/40 text-xs mb-4">
+        Real on-chain lock via a custom vault contract on Arc Testnet. Mint a free test NFT, then lock it for a chosen duration.
+      </p>
+
+      <PrimaryButton disabled={busy} onClick={mintNft}>
+        {busy ? "Working…" : "Mint test NFT"}
+      </PrimaryButton>
+
+      {status && <p className="mt-3 text-xs text-white/70 break-all">{status.msg}</p>}
+
+      {mintedIds.length > 0 && (
+        <div className="mt-5">
+          <p className="text-white/50 text-xs mb-2">Unlocked NFTs you own — ready to lock</p>
+          <div className="flex items-center gap-2 mb-3">
+            <select
+              value={duration}
+              onChange={(e) => setDuration(e.target.value)}
+              className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+            >
+              <option value="7">7 days</option>
+              <option value="30">30 days</option>
+              <option value="90">90 days</option>
+            </select>
           </div>
-        ))}
-      </div>
+          <div className="space-y-2">
+            {mintedIds.map((id) => (
+              <div key={id} className="flex justify-between items-center text-sm text-white/80 border-t border-white/5 pt-2">
+                <span>Token #{id}</span>
+                <PrimaryButton disabled={busy} onClick={() => lockNft(id)}>Lock</PrimaryButton>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {lockIds.length > 0 && (
+        <div className="mt-5">
+          <p className="text-white/50 text-xs mb-2">Your locks</p>
+          <div className="space-y-2">
+            {lockIds.map((id) => {
+              const d = lockDetails[id];
+              return (
+                <div key={id} className="flex justify-between items-center text-sm border-t border-white/5 pt-2">
+                  <span className="text-white/80">
+                    Lock #{id}{d ? ` — token #${d.tokenId}` : ""}
+                  </span>
+                  {d ? (
+                    d.withdrawn ? (
+                      <Pill tone="neutral">Withdrawn</Pill>
+                    ) : d.canWithdraw ? (
+                      <PrimaryButton disabled={busy} onClick={() => withdrawLock(id)}>Withdraw</PrimaryButton>
+                    ) : (
+                      <Pill tone="warn">Locked until {new Date(d.unlockAt).toLocaleDateString()}</Pill>
+                    )
+                  ) : (
+                    <Pill tone="neutral">Loading…</Pill>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </GlassCard>
   );
 }
@@ -724,7 +880,7 @@ export default function ArcTestnetDApp() {
       case "Transfer": return <TransferPage wallet={wallet} />;
       case "Bulk Transfer": return <BulkTransferPage wallet={wallet} />;
       case "Swap": return <SwapPage wallet={wallet} />;
-      case "NFT Lock": return <NFTLockPage />;
+      case "NFT Lock": return <NFTLockPage wallet={wallet} />;
       case "History": return <HistoryPage />;
       case "Leaderboard": return <LeaderboardPage wallet={wallet} />;
       case "Wallet Profile": return <WalletProfilePage wallet={wallet} />;
