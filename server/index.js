@@ -14,6 +14,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import swapRoute from "./swapRoute.js";
+import authRoute from "./authRoute.js";
 
 dotenv.config();
 
@@ -22,6 +23,11 @@ const missing = requiredEnvVars.filter((key) => !process.env[key]);
 if (missing.length > 0) {
   console.warn(
     `Warning: missing env vars (${missing.join(", ")}). Swap endpoints will fail until these are set in .env.`
+  );
+}
+if (!process.env.JWT_SECRET) {
+  console.warn(
+    "Warning: JWT_SECRET is not set. Wallet sign-in (/api/auth/*) will fail until it's set in .env."
   );
 }
 
@@ -35,6 +41,7 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.use("/api", swapRoute);
+app.use("/api", authRoute);
 
 // Fallback error handler so a thrown error doesn't crash the process
 app.use((err, _req, res, _next) => {
