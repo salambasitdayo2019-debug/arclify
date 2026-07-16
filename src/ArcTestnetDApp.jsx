@@ -24,6 +24,12 @@ const CONTRACTS = {
 const API_BASE = import.meta?.env?.VITE_SWAP_API_BASE || "/api";
 const SESSION_STORAGE_KEY = "arclify_session";
 
+// USDC is Arc Testnet's native currency (like ETH on mainnet) — it does NOT
+// live at an ERC-20 contract address, so balances/sends for it must go
+// through the standard native-balance / native-transfer paths, not
+// ERC20_ABI calls. EURC is a real ERC-20 token and uses the normal path.
+const NATIVE_TOKEN_SYMBOL = ARC_TESTNET.nativeCurrency.symbol; // "USDC"
+
 // Tokens actually swappable on Arc Testnet (thin liquidity — see App Kit FAQ)
 const SWAP_SUPPORTED_TESTNET_TOKENS = ["USDC", "EURC", "cirBTC"];
 
@@ -397,16 +403,14 @@ function DashboardPage({ wallet }) {
     async function loadBalances() {
       if (!wallet.provider || !wallet.address) return;
       try {
-        const usdc = new ethers.Contract(CONTRACTS.USDC, ERC20_ABI, wallet.provider);
         const eurc = new ethers.Contract(CONTRACTS.EURC, ERC20_ABI, wallet.provider);
-        const [uBal, uDec, eBal, eDec] = await Promise.all([
-          usdc.balanceOf(wallet.address),
-          usdc.decimals(),
+        const [nativeBal, eBal, eDec] = await Promise.all([
+          wallet.provider.getBalance(wallet.address), // USDC = native currency
           eurc.balanceOf(wallet.address),
           eurc.decimals(),
         ]);
         setBalances({
-          USDC: ethers.formatUnits(uBal, uDec),
+          USDC: ethers.formatUnits(nativeBal, ARC_TESTNET.nativeCurrency.decimals),
           EURC: ethers.formatUnits(eBal, eDec),
         });
       } catch {
@@ -497,9 +501,17 @@ function TransferPage({ wallet }) {
     setStatus({ tone: "neutral", msg: "Confirm in wallet…" });
     try {
       const signer = await wallet.provider.getSigner();
-      const contract = new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
-      const decimals = await contract.decimals();
-      const tx = await contract.transfer(to, ethers.parseUnits(amount, decimals));
+      let tx;
+      if (token === NATIVE_TOKEN_SYMBOL) {
+        tx = await signer.sendTransaction({
+          to,
+          value: ethers.parseUnits(amount, ARC_TESTNET.nativeCurrency.decimals),
+        });
+      } else {
+        const contract = new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
+        const decimals = await contract.decimals();
+        tx = await contract.transfer(to, ethers.parseUnits(amount, decimals));
+      }
       setStatus({ tone: "warn", msg: `Submitted: ${tx.hash}` });
       await tx.wait();
       pushTx({ type: "Transfer", token, to, amount, txHash: tx.hash, status: "confirmed" });
@@ -562,13 +574,16 @@ function BulkTransferPage({ wallet }) {
       return;
     }
     const signer = await wallet.provider.getSigner();
-    const contract = new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
-    const decimals = await contract.decimals();
+    const isNative = token === NATIVE_TOKEN_SYMBOL;
+    const contract = isNative ? null : new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
+    const decimals = isNative ? ARC_TESTNET.nativeCurrency.decimals : await contract.decimals();
     const results = [];
     for (const row of rows) {
       if (!ethers.isAddress(row.to) || !row.amount) continue;
       try {
-        const tx = await contract.transfer(row.to, ethers.parseUnits(row.amount, decimals));
+        const tx = isNative
+          ? await signer.sendTransaction({ to: row.to, value: ethers.parseUnits(row.amount, decimals) })
+          : await contract.transfer(row.to, ethers.parseUnits(row.amount, decimals));
         await tx.wait();
         results.push(`✓ ${row.amount} ${token} → ${row.to.slice(0, 10)}… (${tx.hash.slice(0, 10)}…)`);
       } catch (e) {
