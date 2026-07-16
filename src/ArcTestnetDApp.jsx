@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { ethers } from "ethers";
+import { useInjectedWallets } from "./wallet/eip6963";
+import { getWalletConnectProvider } from "./wallet/walletConnectProvider";
 
 /* ------------------------------------------------------------------ */
 /*  Arc Testnet config                                                 */
@@ -18,6 +20,9 @@ const CONTRACTS = {
   USDC: "0x3600000000000000000000000000000000000000",
   EURC: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
 };
+
+const API_BASE = import.meta?.env?.VITE_SWAP_API_BASE || "/api";
+const SESSION_STORAGE_KEY = "arclify_session";
 
 // Tokens actually swappable on Arc Testnet (thin liquidity — see App Kit FAQ)
 const SWAP_SUPPORTED_TESTNET_TOKENS = ["USDC", "EURC", "cirBTC"];
@@ -87,84 +92,138 @@ function pushTx(entry) {
 /*  matching App Kit's createEthersAdapterFromProvider pattern.         */
 /* ------------------------------------------------------------------ */
 
+async function switchToArc(rawProvider) {
+  if (!rawProvider?.request) return;
+  try {
+    await rawProvider.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: ARC_TESTNET.chainIdHex }],
+    });
+  } catch (switchErr) {
+    // 4902 = chain not added yet
+    if (switchErr.code === 4902) {
+      await rawProvider.request({
+        method: "wallet_addEthereumChain",
+        params: [
+          {
+            chainId: ARC_TESTNET.chainIdHex,
+            chainName: ARC_TESTNET.chainName,
+            nativeCurrency: ARC_TESTNET.nativeCurrency,
+            rpcUrls: ARC_TESTNET.rpcUrls,
+            blockExplorerUrls: ARC_TESTNET.blockExplorerUrls,
+          },
+        ],
+      });
+    } else if (switchErr.code !== 4001) {
+      // Some mobile wallets (via WalletConnect) don't support programmatic
+      // chain switching at all — don't hard-fail the connection over it.
+      console.warn("Could not switch network automatically:", switchErr);
+    } else {
+      throw switchErr;
+    }
+  }
+}
+
+/**
+ * Any-wallet connection hook. Surfaces every EIP-6963 browser extension
+ * wallet it can detect (MetaMask, Coinbase Wallet, Rabby, Brave, OKX,
+ * Rainbow, Trust, etc.) plus a WalletConnect option for mobile wallets via
+ * QR code. The returned shape matches the app's original single-wallet
+ * hook so every page component below keeps working unmodified.
+ */
 function useWallet() {
+  const injected = useInjectedWallets();
+  const [rawProvider, setRawProvider] = useState(null);
   const [address, setAddress] = useState(null);
   const [chainId, setChainId] = useState(null);
   const [provider, setProvider] = useState(null);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState(null);
 
-  const switchToArc = useCallback(async () => {
-    if (!window.ethereum) return;
-    try {
-      await window.ethereum.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: ARC_TESTNET.chainIdHex }],
-      });
-    } catch (switchErr) {
-      // 4902 = chain not added yet
-      if (switchErr.code === 4902) {
-        await window.ethereum.request({
-          method: "wallet_addEthereumChain",
-          params: [
-            {
-              chainId: ARC_TESTNET.chainIdHex,
-              chainName: ARC_TESTNET.chainName,
-              nativeCurrency: ARC_TESTNET.nativeCurrency,
-              rpcUrls: ARC_TESTNET.rpcUrls,
-              blockExplorerUrls: ARC_TESTNET.blockExplorerUrls,
-            },
-          ],
-        });
-      } else {
-        throw switchErr;
-      }
-    }
-  }, []);
-
-  const connect = useCallback(async () => {
-    if (!window.ethereum) {
-      setError("No injected wallet found. Install MetaMask to continue.");
-      return;
-    }
-    setConnecting(true);
-    setError(null);
-    try {
-      // Mirrors App Kit's createEthersAdapterFromProvider({ provider: window.ethereum })
-      const browserProvider = new ethers.BrowserProvider(window.ethereum);
-      const accounts = await browserProvider.send("eth_requestAccounts", []);
-      await switchToArc();
-      const network = await browserProvider.getNetwork();
-      setProvider(browserProvider);
-      setAddress(accounts[0]);
-      setChainId(Number(network.chainId));
-    } catch (e) {
-      setError(e.message || "Failed to connect wallet.");
-    } finally {
-      setConnecting(false);
-    }
-  }, [switchToArc]);
+  const connectors = useMemo(() => {
+    const list = injected.map((p) => ({
+      id: p.info.rdns || p.info.uuid,
+      name: p.info.name,
+      icon: p.info.icon,
+      kind: "injected",
+      raw: p.provider,
+    }));
+    list.push({
+      id: "walletconnect",
+      name: "WalletConnect (mobile / QR)",
+      icon: "",
+      kind: "walletconnect",
+    });
+    return list;
+  }, [injected]);
 
   const disconnect = useCallback(() => {
+    if (rawProvider?.disconnect) {
+      try {
+        rawProvider.disconnect();
+      } catch {
+        // ignore
+      }
+    }
+    setRawProvider(null);
     setAddress(null);
     setProvider(null);
     setChainId(null);
-  }, []);
+  }, [rawProvider]);
+
+  const connect = useCallback(
+    async (connectorId) => {
+      const target = connectors.find((c) => c.id === connectorId);
+      if (!target) {
+        setError("Choose a wallet to continue.");
+        return null;
+      }
+      setConnecting(true);
+      setError(null);
+      try {
+        let raw = target.raw;
+        if (target.kind === "walletconnect") {
+          raw = await getWalletConnectProvider();
+          await raw.connect();
+        }
+        const browserProvider = new ethers.BrowserProvider(raw);
+        const accounts =
+          target.kind === "walletconnect"
+            ? raw.accounts
+            : await browserProvider.send("eth_requestAccounts", []);
+        if (!accounts?.length) throw new Error("No account returned by wallet.");
+        if (target.kind === "injected") await switchToArc(raw);
+        const network = await browserProvider.getNetwork();
+        setRawProvider(raw);
+        setProvider(browserProvider);
+        setAddress(accounts[0]);
+        setChainId(Number(network.chainId));
+        return { address: accounts[0], browserProvider };
+      } catch (e) {
+        setError(e?.message || "Failed to connect wallet.");
+        throw e;
+      } finally {
+        setConnecting(false);
+      }
+    },
+    [connectors]
+  );
 
   useEffect(() => {
-    if (!window.ethereum) return;
+    if (!rawProvider?.on) return;
     const onAccountsChanged = (accounts) => {
-      if (accounts.length === 0) disconnect();
+      if (!accounts?.length) disconnect();
       else setAddress(accounts[0]);
     };
-    const onChainChanged = (hex) => setChainId(parseInt(hex, 16));
-    window.ethereum.on?.("accountsChanged", onAccountsChanged);
-    window.ethereum.on?.("chainChanged", onChainChanged);
+    const onChainChanged = (hex) =>
+      setChainId(typeof hex === "string" ? parseInt(hex, 16) : Number(hex));
+    rawProvider.on("accountsChanged", onAccountsChanged);
+    rawProvider.on("chainChanged", onChainChanged);
     return () => {
-      window.ethereum.removeListener?.("accountsChanged", onAccountsChanged);
-      window.ethereum.removeListener?.("chainChanged", onChainChanged);
+      rawProvider.removeListener?.("accountsChanged", onAccountsChanged);
+      rawProvider.removeListener?.("chainChanged", onChainChanged);
     };
-  }, [disconnect]);
+  }, [rawProvider, disconnect]);
 
   return {
     address,
@@ -172,10 +231,107 @@ function useWallet() {
     provider,
     connecting,
     error,
+    connectors,
     connect,
     disconnect,
     isOnArc: chainId === ARC_TESTNET.chainId,
   };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Auth hook — SIWE-style signature login                             */
+/*  Wallet CONNECTION just proves you hold the keys to sign; SIGNING    */
+/*  a challenge nonce proves you actually control the account, which    */
+/*  is what gates access to the app.                                    */
+/* ------------------------------------------------------------------ */
+
+function useAuth(wallet) {
+  const [status, setStatus] = useState("checking"); // checking | loggedOut | authenticating | authenticated
+  const [error, setError] = useState(null);
+  const [sessionAddress, setSessionAddress] = useState(null);
+
+  useEffect(() => {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) {
+      setStatus("loggedOut");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { token, address } = JSON.parse(raw);
+        const res = await fetch(`${API_BASE}/auth/session`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) throw new Error("expired");
+        if (cancelled) return;
+        setSessionAddress(address);
+        setStatus("authenticated");
+      } catch {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+        if (!cancelled) setStatus("loggedOut");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const login = useCallback(
+    async (connectorId) => {
+      setStatus("authenticating");
+      setError(null);
+      try {
+        const connected = await wallet.connect(connectorId);
+        if (!connected) throw new Error("Wallet connection failed.");
+        const { address, browserProvider } = connected;
+
+        const nonceRes = await fetch(
+          `${API_BASE}/auth/nonce?address=${address}`
+        );
+        if (!nonceRes.ok) throw new Error("Could not start sign-in. Please try again.");
+        const { message } = await nonceRes.json();
+
+        const signer = await browserProvider.getSigner();
+        const signature = await signer.signMessage(message);
+
+        const verifyRes = await fetch(`${API_BASE}/auth/verify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ address, signature }),
+        });
+        if (!verifyRes.ok) {
+          const body = await verifyRes.json().catch(() => ({}));
+          throw new Error(body.error || "Signature verification failed.");
+        }
+        const { token } = await verifyRes.json();
+
+        localStorage.setItem(
+          SESSION_STORAGE_KEY,
+          JSON.stringify({ token, address })
+        );
+        setSessionAddress(address);
+        setStatus("authenticated");
+      } catch (e) {
+        setError(
+          e?.code === "ACTION_REJECTED" || e?.code === 4001
+            ? "Signature request was rejected."
+            : e?.message || "Sign-in failed. Please try again."
+        );
+        setStatus("loggedOut");
+      }
+    },
+    [wallet]
+  );
+
+  const logout = useCallback(() => {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    wallet.disconnect();
+    setSessionAddress(null);
+    setStatus("loggedOut");
+  }, [wallet]);
+
+  return { status, error, sessionAddress, login, logout };
 }
 
 /* ------------------------------------------------------------------ */
@@ -260,30 +416,61 @@ function DashboardPage({ wallet }) {
     loadBalances();
   }, [wallet.provider, wallet.address]);
 
+  const usdcNum = Number(balances.USDC);
+  const eurcNum = Number(balances.EURC);
+  const hasBalances = balances.USDC !== "—" && !Number.isNaN(usdcNum);
+  // Rough combined total for the hero figure — USDC 1:1, EURC show separately
+  // in its own currency below since it isn't a real USD conversion.
+  const total = hasBalances ? usdcNum : null;
+
   return (
-    <div className="grid md:grid-cols-3 gap-4">
-      <GlassCard className="p-6 md:col-span-2">
-        <p className="text-white/50 text-sm mb-1">Connected as</p>
-        <p className="text-white font-mono text-sm break-all">
-          {wallet.address ?? "Not connected"}
-        </p>
-        <div className="mt-4 flex items-center gap-2">
-          <Pill tone={wallet.isOnArc ? "ok" : "warn"}>
-            {wallet.isOnArc ? "Arc Testnet (5042002)" : "Wrong network"}
-          </Pill>
+    <div className="space-y-5">
+      {/* Hero total balance — big and unmissable, bank-app style */}
+      <GlassCard className="p-8 md:p-10">
+        <div className="flex items-start justify-between flex-wrap gap-4">
+          <div>
+            <p className="text-white/50 text-sm mb-2">Total balance</p>
+            <p className="text-white text-5xl md:text-6xl font-bold tracking-tight tabular-nums">
+              {total === null ? "—" : `$${total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+            </p>
+            <p className="text-white/30 text-xs mt-2">USDC balance shown as USD equivalent</p>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            <Pill tone={wallet.isOnArc ? "ok" : "warn"}>
+              {wallet.isOnArc ? "Arc Testnet · 5042002" : "Wrong network"}
+            </Pill>
+            <p className="text-white/40 font-mono text-xs break-all text-right">
+              {wallet.address ?? "Not connected"}
+            </p>
+          </div>
         </div>
       </GlassCard>
-      <GlassCard className="p-6">
-        <p className="text-white/50 text-sm mb-3">Balances</p>
-        <div className="flex justify-between text-white text-sm mb-2">
-          <span>USDC</span>
-          <span className="font-mono">{balances.USDC}</span>
-        </div>
-        <div className="flex justify-between text-white text-sm">
-          <span>EURC</span>
-          <span className="font-mono">{balances.EURC}</span>
-        </div>
-      </GlassCard>
+
+      {/* Individual token cards */}
+      <div className="grid sm:grid-cols-2 gap-4">
+        <GlassCard className="p-6">
+          <div className="flex items-center justify-between mb-5">
+            <span className="text-white/50 text-sm font-medium">USDC</span>
+            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-cyan-400 to-cyan-600 flex items-center justify-center text-xs font-bold text-white">
+              $
+            </span>
+          </div>
+          <p className="text-white text-3xl font-semibold tabular-nums">
+            {balances.USDC}
+          </p>
+        </GlassCard>
+        <GlassCard className="p-6">
+          <div className="flex items-center justify-between mb-5">
+            <span className="text-white/50 text-sm font-medium">EURC</span>
+            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-400 to-purple-600 flex items-center justify-center text-xs font-bold text-white">
+              €
+            </span>
+          </div>
+          <p className="text-white text-3xl font-semibold tabular-nums">
+            {balances.EURC}
+          </p>
+        </GlassCard>
+      </div>
     </div>
   );
 }
@@ -443,7 +630,7 @@ function BulkTransferPage({ wallet }) {
 /*  server-side adapter. See server/swapRoute.js for that endpoint.     */
 /* ------------------------------------------------------------------ */
 
-const SWAP_API_BASE = import.meta?.env?.VITE_SWAP_API_BASE || "/api";
+const SWAP_API_BASE = API_BASE;
 
 function SwapPage({ wallet }) {
   const [tokenIn, setTokenIn] = useState("USDC");
@@ -867,11 +1054,95 @@ function WalletProfilePage({ wallet }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Login gate — shown before anything else in the app is reachable.    */
+/*  Flow: tick "I am not a robot" -> pick any wallet -> sign a one-time */
+/*  message to prove ownership -> app unlocks.                          */
+/* ------------------------------------------------------------------ */
+
+function LoginGate({ wallet, auth }) {
+  const [notRobot, setNotRobot] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
+  const busy = auth.status === "authenticating";
+  const injectedConnectors = wallet.connectors.filter((c) => c.kind === "injected");
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-6 bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
+      <GlassCard className="w-full max-w-md p-8">
+        <div className="flex items-center justify-center gap-2 mb-2">
+          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-cyan-400 to-purple-600" />
+          <span className="text-white text-lg font-semibold tracking-tight">Arclify</span>
+        </div>
+        <p className="text-white/50 text-sm text-center mb-6">
+          Sign in with your wallet to open your Arc Testnet dashboard.
+        </p>
+
+        <label className="flex items-center gap-3 mb-5 px-4 py-3 rounded-xl border border-white/10 bg-white/5 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={notRobot}
+            onChange={(e) => setNotRobot(e.target.checked)}
+            className="w-4 h-4 accent-cyan-400"
+          />
+          <span className="text-white/80 text-sm">I am not a robot</span>
+        </label>
+
+        {!showPicker ? (
+          <PrimaryButton
+            className="w-full"
+            disabled={!notRobot}
+            onClick={() => setShowPicker(true)}
+          >
+            Continue
+          </PrimaryButton>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-white/50 text-xs mb-1">Choose a wallet</p>
+            {wallet.connectors.map((c) => (
+              <button
+                key={c.id}
+                disabled={busy}
+                onClick={() => auth.login(c.id)}
+                className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition text-left disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {c.icon ? (
+                  <img src={c.icon} alt="" className="w-6 h-6 rounded" />
+                ) : (
+                  <div className="w-6 h-6 rounded bg-gradient-to-br from-cyan-400 to-purple-600" />
+                )}
+                <span className="text-white text-sm">{c.name}</span>
+              </button>
+            ))}
+            {injectedConnectors.length === 0 && (
+              <p className="text-white/40 text-xs pt-1">
+                No browser wallet extension detected — use WalletConnect above
+                to scan a QR code with any mobile wallet.
+              </p>
+            )}
+          </div>
+        )}
+
+        {busy && (
+          <p className="text-cyan-300 text-xs text-center mt-4">
+            Confirm the connection, then sign the message in your wallet…
+          </p>
+        )}
+        {(auth.error || wallet.error) && (
+          <p className="text-rose-300 text-xs text-center mt-4">
+            {auth.error || wallet.error}
+          </p>
+        )}
+      </GlassCard>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  App shell                                                           */
 /* ------------------------------------------------------------------ */
 
 export default function ArcTestnetDApp() {
   const wallet = useWallet();
+  const auth = useAuth(wallet);
   const [page, setPage] = useState("Dashboard");
 
   const pageEl = useMemo(() => {
@@ -888,6 +1159,18 @@ export default function ArcTestnetDApp() {
     }
   }, [page, wallet]);
 
+  if (auth.status === "checking") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#0B0A16]">
+        <p className="text-white/40 text-sm">Loading…</p>
+      </div>
+    );
+  }
+
+  if (auth.status !== "authenticated") {
+    return <LoginGate wallet={wallet} auth={auth} />;
+  }
+
   return (
     <div className="min-h-screen bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
       <header className="flex items-center justify-between px-6 py-4 border-b border-white/5">
@@ -895,20 +1178,25 @@ export default function ArcTestnetDApp() {
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-400 to-purple-600" />
           <span className="text-white font-semibold tracking-tight">Arclify</span>
         </div>
-        {wallet.address ? (
-          <div className="flex items-center gap-2">
-            <Pill tone={wallet.isOnArc ? "ok" : "warn"}>
-              {wallet.address.slice(0, 6)}…{wallet.address.slice(-4)}
-            </Pill>
-            <button onClick={wallet.disconnect} className="text-white/40 text-xs">Disconnect</button>
-          </div>
-        ) : (
-          <PrimaryButton onClick={wallet.connect} disabled={wallet.connecting}>
-            {wallet.connecting ? "Connecting…" : "Connect Wallet"}
-          </PrimaryButton>
-        )}
+        <div className="flex items-center gap-2">
+          <Pill tone={wallet.isOnArc ? "ok" : "warn"}>
+            {wallet.address
+              ? `${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}`
+              : `${auth.sessionAddress?.slice(0, 6)}…${auth.sessionAddress?.slice(-4)}`}
+          </Pill>
+          <button onClick={auth.logout} className="text-white/40 text-xs hover:text-white/70">
+            Sign out
+          </button>
+        </div>
       </header>
 
+      {!wallet.address && auth.sessionAddress && (
+        <div className="px-6 pt-3">
+          <p className="text-amber-300 text-xs">
+            Signed in as {auth.sessionAddress.slice(0, 6)}…{auth.sessionAddress.slice(-4)}, but your wallet isn't connected in this tab — reconnect it to send transactions.
+          </p>
+        </div>
+      )}
       {wallet.error && (
         <div className="px-6 pt-3">
           <p className="text-rose-300 text-xs">{wallet.error}</p>
