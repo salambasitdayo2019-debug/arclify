@@ -30,6 +30,12 @@ const STABLECOIN_DECIMALS = 6;
 const CIRBTC_DECIMALS = 8;
 const TOKEN_DECIMALS = { EURC: STABLECOIN_DECIMALS, cirBTC: CIRBTC_DECIMALS };
 
+// How far back to scan for on-chain Transfer events. Arc Testnet's public
+// RPC both rate-limits and caps how wide a single eth_getLogs range can be,
+// so History/Leaderboard show "recent activity" rather than all-time —
+// there's no indexer behind this app to make an all-time view cheap.
+const RECENT_BLOCK_WINDOW = 8000;
+
 // IMPORTANT: ARC_TESTNET.nativeCurrency.decimals (6) is metadata used only
 // when registering the chain with a wallet (wallet_addEthereumChain) — it's
 // what MetaMask shows as a label. The actual raw balance returned by
@@ -79,6 +85,7 @@ const ERC20_ABI = [
   "function balanceOf(address owner) view returns (uint256)",
   "function decimals() view returns (uint8)",
   "function transfer(address to, uint256 amount) returns (bool)",
+  "event Transfer(address indexed from, address indexed to, uint256 value)",
 ];
 
 /* ------------------------------------------------------------------ */
@@ -459,6 +466,64 @@ const Pill = ({ tone = "neutral", children }) => {
   );
 };
 
+// Simple animated placeholder bar shown while a value is still loading.
+const Skeleton = ({ className = "" }) => (
+  <div className={`animate-pulse rounded-md bg-white/10 ${className}`} />
+);
+
+/* ------------------------------------------------------------------ */
+/*  Toast notifications — a tiny global pub/sub, no context needed      */
+/*  since pages here just receive `wallet` as a prop rather than        */
+/*  reading from a provider. `toast(...)` can be called from anywhere;  */
+/*  <ToastViewport/> (mounted once in the App shell) renders them.      */
+/* ------------------------------------------------------------------ */
+
+let toastListeners = [];
+function toast({ tone = "neutral", title, message }) {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const entry = { id, tone, title, message };
+  toastListeners.forEach((fn) => fn(entry));
+  return id;
+}
+
+function ToastViewport() {
+  const [items, setItems] = useState([]);
+
+  useEffect(() => {
+    const onToast = (entry) => {
+      setItems((prev) => [...prev, entry]);
+      setTimeout(() => {
+        setItems((prev) => prev.filter((t) => t.id !== entry.id));
+      }, 6000);
+    };
+    toastListeners.push(onToast);
+    return () => {
+      toastListeners = toastListeners.filter((fn) => fn !== onToast);
+    };
+  }, []);
+
+  const toneStyles = {
+    ok: "border-emerald-500/30 bg-emerald-950/80",
+    bad: "border-rose-500/30 bg-rose-950/80",
+    warn: "border-amber-500/30 bg-amber-950/80",
+    neutral: "border-white/10 bg-[#161226]/90",
+  };
+
+  return (
+    <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 w-[calc(100%-2rem)] max-w-sm">
+      {items.map((t) => (
+        <div
+          key={t.id}
+          className={`rounded-xl border ${toneStyles[t.tone] || toneStyles.neutral} backdrop-blur-xl px-4 py-3 shadow-lg animate-[fadeIn_0.15s_ease-out]`}
+        >
+          {t.title && <p className="text-white text-sm font-medium mb-0.5">{t.title}</p>}
+          {t.message && <p className="text-white/60 text-xs break-all">{t.message}</p>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 const NAV_ITEMS = [
   "Dashboard",
   "Transfer",
@@ -547,9 +612,13 @@ function DashboardPage({ wallet }) {
         <div className="flex items-start justify-between flex-wrap gap-4">
           <div>
             <p className="text-white/50 text-sm mb-2">Total balance</p>
-            <p className="text-white text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight tabular-nums break-all">
-              {total === null ? "—" : `$${total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-            </p>
+            {total === null ? (
+              <Skeleton className="h-12 sm:h-14 md:h-16 w-64 max-w-full" />
+            ) : (
+              <p className="text-white text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight tabular-nums break-all">
+                {`$${total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              </p>
+            )}
             <p className="text-white/30 text-xs mt-2">Your USDC balance (1 USDC ≈ $1)</p>
           </div>
           <div className="flex flex-col items-end gap-2">
@@ -581,9 +650,11 @@ function DashboardPage({ wallet }) {
               $
             </span>
           </div>
-          <p className="text-white text-3xl font-semibold tabular-nums">
-            {balances.USDC}
-          </p>
+          {balances.USDC === "—" ? (
+            <Skeleton className="h-9 w-28" />
+          ) : (
+            <p className="text-white text-3xl font-semibold tabular-nums">{balances.USDC}</p>
+          )}
         </GlassCard>
         <GlassCard className="p-6">
           <div className="flex items-center justify-between mb-5">
@@ -592,9 +663,11 @@ function DashboardPage({ wallet }) {
               €
             </span>
           </div>
-          <p className="text-white text-3xl font-semibold tabular-nums">
-            {balances.EURC}
-          </p>
+          {balances.EURC === "—" ? (
+            <Skeleton className="h-9 w-28" />
+          ) : (
+            <p className="text-white text-3xl font-semibold tabular-nums">{balances.EURC}</p>
+          )}
         </GlassCard>
         <GlassCard className="p-6">
           <div className="flex items-center justify-between mb-5">
@@ -603,9 +676,11 @@ function DashboardPage({ wallet }) {
               ₿
             </span>
           </div>
-          <p className="text-white text-3xl font-semibold tabular-nums">
-            {balances.cirBTC}
-          </p>
+          {balances.cirBTC === "—" ? (
+            <Skeleton className="h-9 w-28" />
+          ) : (
+            <p className="text-white text-3xl font-semibold tabular-nums">{balances.cirBTC}</p>
+          )}
         </GlassCard>
       </div>
     </div>
@@ -620,18 +695,18 @@ function TransferPage({ wallet }) {
   const [token, setToken] = useState("USDC");
   const [to, setTo] = useState("");
   const [amount, setAmount] = useState("");
-  const [status, setStatus] = useState(null);
+  const [sending, setSending] = useState(false);
 
   const handleSend = useCallback(async () => {
     if (!wallet.provider || !wallet.address) {
-      setStatus({ tone: "bad", msg: "Connect your wallet first." });
+      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     if (!ethers.isAddress(to) || !amount) {
-      setStatus({ tone: "bad", msg: "Enter a valid address and amount." });
+      toast({ tone: "bad", title: "Invalid input", message: "Enter a valid address and amount." });
       return;
     }
-    setStatus({ tone: "neutral", msg: "Confirm in wallet…" });
+    setSending(true);
     try {
       const signer = await wallet.provider.getSigner();
       let tx;
@@ -645,12 +720,16 @@ function TransferPage({ wallet }) {
         const decimals = TOKEN_DECIMALS[token];
         tx = await contract.transfer(to, ethers.parseUnits(amount, decimals));
       }
-      setStatus({ tone: "warn", msg: `Submitted: ${tx.hash}` });
+      toast({ tone: "warn", title: "Transaction submitted", message: `${tx.hash.slice(0, 18)}…` });
       await tx.wait();
       pushTx({ type: "Transfer", token, to, amount, txHash: tx.hash, status: "confirmed" });
-      setStatus({ tone: "ok", msg: `Confirmed: ${tx.hash}` });
+      toast({ tone: "ok", title: "Transfer confirmed", message: `${amount} ${token} sent successfully.` });
+      setTo("");
+      setAmount("");
     } catch (e) {
-      setStatus({ tone: "bad", msg: e.shortMessage || e.message });
+      toast({ tone: "bad", title: "Transfer failed", message: e.shortMessage || e.message });
+    } finally {
+      setSending(false);
     }
   }, [wallet, token, to, amount]);
 
@@ -681,10 +760,9 @@ function TransferPage({ wallet }) {
         placeholder="0.00"
         className="w-full mt-1 mb-4 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
       />
-      <PrimaryButton onClick={handleSend}>Send</PrimaryButton>
-      {status && (
-        <p className="mt-3 text-xs text-white/70 break-all">{status.msg}</p>
-      )}
+      <PrimaryButton onClick={handleSend} disabled={sending}>
+        {sending ? "Sending…" : "Send"}
+      </PrimaryButton>
     </GlassCard>
   );
 }
@@ -704,7 +782,7 @@ function BulkTransferPage({ wallet }) {
 
   const runBatch = useCallback(async () => {
     if (!wallet.provider) {
-      setLog(["Connect your wallet first."]);
+      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     const signer = await wallet.provider.getSigner();
@@ -712,6 +790,8 @@ function BulkTransferPage({ wallet }) {
     const contract = isNative ? null : new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
     const decimals = isNative ? NATIVE_BALANCE_DECIMALS : TOKEN_DECIMALS[token];
     const results = [];
+    let succeeded = 0;
+    let failed = 0;
     for (const row of rows) {
       if (!ethers.isAddress(row.to) || !row.amount) continue;
       try {
@@ -720,12 +800,19 @@ function BulkTransferPage({ wallet }) {
           : await contract.transfer(row.to, ethers.parseUnits(row.amount, decimals));
         await tx.wait();
         results.push(`✓ ${row.amount} ${token} → ${row.to.slice(0, 10)}… (${tx.hash.slice(0, 10)}…)`);
+        succeeded++;
       } catch (e) {
         results.push(`✗ ${row.to.slice(0, 10)}… failed: ${e.shortMessage || e.message}`);
+        failed++;
       }
     }
     writeLS(LS_KEYS.bulk, [{ id: crypto.randomUUID(), token, rows, timestamp: Date.now() }, ...readLS(LS_KEYS.bulk, [])]);
     setLog(results);
+    toast({
+      tone: failed === 0 ? "ok" : succeeded === 0 ? "bad" : "warn",
+      title: "Batch complete",
+      message: `${succeeded} succeeded, ${failed} failed.`,
+    });
   }, [wallet, rows, token]);
 
   return (
@@ -828,6 +915,7 @@ function SwapPage({ wallet }) {
   const handleSwap = useCallback(async () => {
     if (!wallet.address) {
       setErrorMsg("Connect your wallet first.");
+      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     setBusy(true);
@@ -856,8 +944,14 @@ function SwapPage({ wallet }) {
         estimatedOutput: data.estimatedOutput,
         status: data.status || "submitted",
       });
+      toast({
+        tone: "ok",
+        title: "Swap submitted",
+        message: `${amountIn} ${tokenIn} → ${tokenOut}`,
+      });
     } catch (e) {
       setErrorMsg(e.message);
+      toast({ tone: "bad", title: "Swap failed", message: e.message });
     } finally {
       setBusy(false);
     }
@@ -954,7 +1048,6 @@ function NFTLockPage({ wallet }) {
   const [lockDetails, setLockDetails] = useState({});
   const [duration, setDuration] = useState("7");
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState(null);
 
   const getContracts = useCallback(async () => {
     const signer = await wallet.provider.getSigner();
@@ -990,11 +1083,10 @@ function NFTLockPage({ wallet }) {
 
   const mintNft = useCallback(async () => {
     if (!wallet.provider) {
-      setStatus({ tone: "bad", msg: "Connect your wallet first." });
+      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     setBusy(true);
-    setStatus({ tone: "neutral", msg: "Confirm mint in wallet…" });
     try {
       const { nft } = await getContracts();
       const tx = await nft.mint();
@@ -1006,9 +1098,9 @@ function NFTLockPage({ wallet }) {
       const next = [newTokenId, ...mintedIds];
       setMintedIds(next);
       writeLS(LS_MINTED_KEY, next);
-      setStatus({ tone: "ok", msg: `Minted token #${newTokenId}` });
+      toast({ tone: "ok", title: "NFT minted", message: `Token #${newTokenId}` });
     } catch (e) {
-      setStatus({ tone: "bad", msg: e.shortMessage || e.message });
+      toast({ tone: "bad", title: "Mint failed", message: e.shortMessage || e.message });
     } finally {
       setBusy(false);
     }
@@ -1016,7 +1108,6 @@ function NFTLockPage({ wallet }) {
 
   const lockNft = useCallback(async (tokenId) => {
     setBusy(true);
-    setStatus({ tone: "neutral", msg: "Approving, then locking…" });
     try {
       const { nft, vault } = await getContracts();
       const approveTx = await nft.approve(NFT_LOCK_VAULT_ADDRESS, tokenId);
@@ -1038,9 +1129,9 @@ function NFTLockPage({ wallet }) {
       setMintedIds(nextMinted);
       writeLS(LS_MINTED_KEY, nextMinted);
 
-      setStatus({ tone: "ok", msg: `Locked token #${tokenId} until unlock time.` });
+      toast({ tone: "ok", title: "NFT locked", message: `Token #${tokenId} locked for ${duration} day(s).` });
     } catch (e) {
-      setStatus({ tone: "bad", msg: e.shortMessage || e.message });
+      toast({ tone: "bad", title: "Lock failed", message: e.shortMessage || e.message });
     } finally {
       setBusy(false);
     }
@@ -1048,15 +1139,14 @@ function NFTLockPage({ wallet }) {
 
   const withdrawLock = useCallback(async (lockId) => {
     setBusy(true);
-    setStatus({ tone: "neutral", msg: "Withdrawing…" });
     try {
       const { vault } = await getContracts();
       const tx = await vault.withdraw(lockId);
       await tx.wait();
-      setStatus({ tone: "ok", msg: `Withdrawn lock #${lockId}.` });
+      toast({ tone: "ok", title: "Withdrawn", message: `Lock #${lockId} withdrawn.` });
       setLockDetails((prev) => ({ ...prev, [lockId]: { ...prev[lockId], withdrawn: true } }));
     } catch (e) {
-      setStatus({ tone: "bad", msg: e.shortMessage || e.message });
+      toast({ tone: "bad", title: "Withdraw failed", message: e.shortMessage || e.message });
     } finally {
       setBusy(false);
     }
@@ -1072,8 +1162,6 @@ function NFTLockPage({ wallet }) {
       <PrimaryButton disabled={busy} onClick={mintNft}>
         {busy ? "Working…" : "Mint test NFT"}
       </PrimaryButton>
-
-      {status && <p className="mt-3 text-xs text-white/70 break-all">{status.msg}</p>}
 
       {mintedIds.length > 0 && (
         <div className="mt-5">
@@ -1133,23 +1221,111 @@ function NFTLockPage({ wallet }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Page: History                                                       */
+/*  Page: History — real on-chain Transfer events, not localStorage     */
+/*  Native USDC transfers don't emit ERC-20 Transfer logs (it's the     */
+/*  chain's native currency, not a token contract), so only EURC and    */
+/*  cirBTC activity can be reconstructed this way. That's flagged in    */
+/*  the UI rather than silently omitted.                                */
 /* ------------------------------------------------------------------ */
 
-function HistoryPage() {
-  const [txs] = useState(() => readLS(LS_KEYS.txs, []));
+function HistoryPage({ wallet }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [scanned, setScanned] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      if (!wallet.provider || !wallet.address) return;
+      setLoading(true);
+      try {
+        const latest = await withRpcRetry(() => wallet.provider.getBlockNumber());
+        const fromBlock = Math.max(0, latest - RECENT_BLOCK_WINDOW);
+        const found = [];
+        for (const [symbol, addr] of Object.entries({ EURC: CONTRACTS.EURC, cirBTC: CONTRACTS.cirBTC })) {
+          const contract = new ethers.Contract(addr, ERC20_ABI, wallet.provider);
+          const outgoing = await withRpcRetry(() =>
+            contract.queryFilter(contract.filters.Transfer(wallet.address, null), fromBlock, latest)
+          );
+          await sleep(350);
+          const incoming = await withRpcRetry(() =>
+            contract.queryFilter(contract.filters.Transfer(null, wallet.address), fromBlock, latest)
+          );
+          await sleep(350);
+          for (const ev of [...outgoing, ...incoming]) {
+            const sent = ev.args.from.toLowerCase() === wallet.address.toLowerCase();
+            found.push({
+              key: `${ev.transactionHash}-${ev.logIndex}`,
+              token: symbol,
+              direction: sent ? "Sent" : "Received",
+              amount: ethers.formatUnits(ev.args.value, TOKEN_DECIMALS[symbol]),
+              counterparty: sent ? ev.args.to : ev.args.from,
+              txHash: ev.transactionHash,
+              blockNumber: ev.blockNumber,
+            });
+          }
+        }
+        found.sort((a, b) => b.blockNumber - a.blockNumber);
+        if (!cancelled) {
+          setRows(found);
+          setScanned({ fromBlock, toBlock: latest });
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [wallet.provider, wallet.address]);
+
   return (
     <GlassCard className="p-6">
-      <h2 className="text-white text-lg font-semibold mb-4">History</h2>
+      <h2 className="text-white text-lg font-semibold mb-1">History</h2>
+      <p className="text-white/40 text-xs mb-4">
+        Real on-chain EURC and cirBTC transfers for your address
+        {scanned && ` — blocks ${scanned.fromBlock.toLocaleString()} to ${scanned.toBlock.toLocaleString()}`}.
+        Native USDC transfers aren't shown here since they don't emit event logs; check the{" "}
+        <a
+          href={`${ARC_TESTNET.blockExplorerUrls[0]}/address/${wallet.address || ""}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-cyan-300 hover:text-cyan-200"
+        >
+          block explorer
+        </a>{" "}
+        for full activity.
+      </p>
+      {loading && rows.length === 0 && (
+        <div className="space-y-2">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-10 w-full" />
+          ))}
+        </div>
+      )}
+      {!loading && rows.length === 0 && (
+        <p className="text-white/40 text-sm">No EURC or cirBTC transfers found in the recent block range.</p>
+      )}
       <div className="space-y-2">
-        {txs.length === 0 && <p className="text-white/40 text-sm">No transactions yet.</p>}
-        {txs.map((tx) => (
-          <div key={tx.id} className="flex justify-between items-center text-sm border-t border-white/5 pt-2">
+        {rows.map((tx) => (
+          <a
+            key={tx.key}
+            href={`${ARC_TESTNET.blockExplorerUrls[0]}/tx/${tx.txHash}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex justify-between items-center text-sm border-t border-white/5 pt-2 pb-1 hover:bg-white/5 rounded px-1 -mx-1 transition"
+          >
             <div className="text-white/80">
-              {tx.type} {tx.token || tx.tokenIn} {tx.amount || tx.amountIn}
+              {tx.direction} {tx.amount} {tx.token}
+              <span className="text-white/30 font-mono text-xs ml-2">
+                {tx.direction === "Sent" ? "→" : "←"} {tx.counterparty.slice(0, 8)}…
+              </span>
             </div>
-            <Pill tone={tx.status === "confirmed" ? "ok" : "warn"}>{tx.status}</Pill>
-          </div>
+            <Pill tone={tx.direction === "Sent" ? "warn" : "ok"}>{tx.direction}</Pill>
+          </a>
         ))}
       </div>
     </GlassCard>
@@ -1157,22 +1333,90 @@ function HistoryPage() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Page: Leaderboard (simulated ranking by local tx volume)            */
+/*  Page: Leaderboard — real on-chain activity ranking                  */
+/*  Ranked by number of EURC/cirBTC transfers sent in the recent block  */
+/*  window (not by combined dollar volume, since EURC and cirBTC aren't */
+/*  directly comparable units without a live price feed this app        */
+/*  doesn't have).                                                      */
 /* ------------------------------------------------------------------ */
 
 function LeaderboardPage({ wallet }) {
-  const txs = readLS(LS_KEYS.txs, []);
-  const total = txs.reduce((s, t) => s + Number(t.amount || t.amountIn || 0), 0);
-  const rows = [{ address: wallet.address || "you", volume: total }];
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [scanned, setScanned] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      if (!wallet.provider) return;
+      setLoading(true);
+      try {
+        const latest = await withRpcRetry(() => wallet.provider.getBlockNumber());
+        const fromBlock = Math.max(0, latest - RECENT_BLOCK_WINDOW);
+        const totals = {}; // address(lower) -> { count, EURC, cirBTC }
+        for (const [symbol, addr] of Object.entries({ EURC: CONTRACTS.EURC, cirBTC: CONTRACTS.cirBTC })) {
+          const contract = new ethers.Contract(addr, ERC20_ABI, wallet.provider);
+          const events = await withRpcRetry(() =>
+            contract.queryFilter(contract.filters.Transfer(), fromBlock, latest)
+          );
+          await sleep(350);
+          for (const ev of events) {
+            const sender = ev.args.from.toLowerCase();
+            if (!totals[sender]) totals[sender] = { address: ev.args.from, count: 0, EURC: 0, cirBTC: 0 };
+            totals[sender].count += 1;
+            totals[sender][symbol] += Number(ethers.formatUnits(ev.args.value, TOKEN_DECIMALS[symbol]));
+          }
+        }
+        const ranked = Object.values(totals)
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 10);
+        if (!cancelled) {
+          setRows(ranked);
+          setScanned({ fromBlock, toBlock: latest });
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [wallet.provider]);
 
   return (
     <GlassCard className="p-6">
-      <h2 className="text-white text-lg font-semibold mb-4">Leaderboard</h2>
-      <p className="text-white/40 text-xs mb-4">Based on locally recorded activity for this browser.</p>
+      <h2 className="text-white text-lg font-semibold mb-1">Leaderboard</h2>
+      <p className="text-white/40 text-xs mb-4">
+        Ranked by number of on-chain EURC/cirBTC transfers sent
+        {scanned && ` — blocks ${scanned.fromBlock.toLocaleString()} to ${scanned.toBlock.toLocaleString()}`}.
+        Recent activity only, not all-time.
+      </p>
+      {loading && rows.length === 0 && (
+        <div className="space-y-2">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-10 w-full" />
+          ))}
+        </div>
+      )}
+      {!loading && rows.length === 0 && (
+        <p className="text-white/40 text-sm">No transfer activity found in the recent block range.</p>
+      )}
       {rows.map((r, i) => (
-        <div key={i} className="flex justify-between text-sm text-white/80 border-t border-white/5 pt-2">
-          <span className="font-mono">{r.address?.slice(0, 12)}…</span>
-          <span>{r.volume.toFixed(2)}</span>
+        <div
+          key={r.address}
+          className={`flex justify-between items-center text-sm border-t border-white/5 pt-2 pb-1 ${
+            wallet.address?.toLowerCase() === r.address.toLowerCase() ? "text-cyan-300" : "text-white/80"
+          }`}
+        >
+          <span className="font-mono">
+            #{i + 1} {r.address.slice(0, 8)}…{r.address.slice(-4)}
+          </span>
+          <span className="text-xs text-right">
+            {r.count} txns · {r.EURC.toFixed(2)} EURC · {r.cirBTC.toFixed(4)} cirBTC
+          </span>
         </div>
       ))}
     </GlassCard>
@@ -1217,7 +1461,7 @@ function LoginGate({ wallet, auth }) {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
-      <div className="flex-1 flex items-center justify-center p-6">
+      <div className="flex-1 flex flex-col items-center justify-center p-6 gap-6">
         <GlassCard className="w-full max-w-md p-8">
           <div className="flex items-center justify-center gap-2 mb-2">
             <img src="/favicon.svg" alt="Arclify" className="w-9 h-9" />
@@ -1283,6 +1527,22 @@ function LoginGate({ wallet, auth }) {
             </p>
           )}
         </GlassCard>
+
+        <div className="w-full max-w-md grid grid-cols-3 gap-3">
+          {[
+            { step: "1", title: "Connect", desc: "Pick any wallet — extension or mobile." },
+            { step: "2", title: "Sign", desc: "Prove it's yours with a free signature." },
+            { step: "3", title: "Explore", desc: "Send, swap, and lock on Arc Testnet." },
+          ].map((s) => (
+            <div key={s.step} className="text-center">
+              <div className="mx-auto mb-2 w-7 h-7 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-cyan-300 text-xs font-semibold">
+                {s.step}
+              </div>
+              <p className="text-white text-xs font-medium">{s.title}</p>
+              <p className="text-white/40 text-[11px] mt-0.5 leading-snug">{s.desc}</p>
+            </div>
+          ))}
+        </div>
       </div>
       <ContactFooter />
     </div>
@@ -1373,7 +1633,7 @@ export default function ArcTestnetDApp() {
       case "Bulk Transfer": return <BulkTransferPage wallet={wallet} />;
       case "Swap": return <SwapPage wallet={wallet} />;
       case "NFT Lock": return <NFTLockPage wallet={wallet} />;
-      case "History": return <HistoryPage />;
+      case "History": return <HistoryPage wallet={wallet} />;
       case "Leaderboard": return <LeaderboardPage wallet={wallet} />;
       case "Wallet Profile": return <WalletProfilePage wallet={wallet} />;
       default: return null;
@@ -1394,6 +1654,7 @@ export default function ArcTestnetDApp() {
 
   return (
     <div className="min-h-screen bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
+      <ToastViewport />
       {showWelcome && <WelcomeOverlay onDismiss={() => setShowWelcome(false)} />}
       <header className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-4 border-b border-white/5">
         <div className="flex items-center gap-2">
