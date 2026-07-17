@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { ethers } from "ethers";
 import { useInjectedWallets } from "./wallet/eip6963";
 import { getWalletConnectProvider } from "./wallet/walletConnectProvider";
@@ -268,6 +268,16 @@ function useAuth(wallet) {
   const [error, setError] = useState(null);
   const [sessionAddress, setSessionAddress] = useState(null);
 
+  // `wallet` is a new object every render, and the mount-only effect below
+  // captures it once. By the time the delayed silent-reconnect fires, the
+  // wallet extensions have usually finished announcing themselves (EIP-6963)
+  // and `wallet.connectors` has grown — but the captured closure wouldn't
+  // see that update. Routing through a ref keeps it pointed at the latest
+  // wallet object on every render, so the delayed call sees the current
+  // connector list instead of the empty one from the very first render.
+  const walletRef = useRef(wallet);
+  walletRef.current = wallet;
+
   useEffect(() => {
     const raw = localStorage.getItem(SESSION_STORAGE_KEY);
     if (!raw) {
@@ -295,8 +305,8 @@ function useAuth(wallet) {
         if (connectorId) {
           setTimeout(async () => {
             if (cancelled) return;
-            await wallet.connect(connectorId, { silent: true });
-          }, 500);
+            await walletRef.current.connect(connectorId, { silent: true });
+          }, 800);
         }
       } catch {
         localStorage.removeItem(SESSION_STORAGE_KEY);
