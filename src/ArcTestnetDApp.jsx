@@ -481,24 +481,38 @@ function DashboardPage({ wallet }) {
     let cancelled = false;
     async function loadBalances() {
       if (!wallet.provider || !wallet.address) return;
+      const eurc = new ethers.Contract(CONTRACTS.EURC, ERC20_ABI, wallet.provider);
+      const cirbtc = new ethers.Contract(CONTRACTS.cirBTC, ERC20_ABI, wallet.provider);
+
+      // Each balance is fetched (and can fail) independently — one bad
+      // token shouldn't blank out the ones that succeeded.
       try {
-        const eurc = new ethers.Contract(CONTRACTS.EURC, ERC20_ABI, wallet.provider);
-        const cirbtc = new ethers.Contract(CONTRACTS.cirBTC, ERC20_ABI, wallet.provider);
-        // Sequential, not Promise.all — firing several calls at once is
-        // exactly what trips Arc Testnet's public RPC rate limit.
         const nativeBal = await withRpcRetry(() =>
           wallet.provider.getBalance(wallet.address)
         );
-        const eBal = await withRpcRetry(() => eurc.balanceOf(wallet.address));
-        const bBal = await withRpcRetry(() => cirbtc.balanceOf(wallet.address));
-        if (cancelled) return;
-        setBalances({
-          USDC: ethers.formatUnits(nativeBal, NATIVE_BALANCE_DECIMALS),
-          EURC: ethers.formatUnits(eBal, TOKEN_DECIMALS.EURC),
-          cirBTC: ethers.formatUnits(bBal, TOKEN_DECIMALS.cirBTC),
-        });
+        if (!cancelled) {
+          setBalances((b) => ({ ...b, USDC: ethers.formatUnits(nativeBal, NATIVE_BALANCE_DECIMALS) }));
+        }
       } catch {
-        if (!cancelled) setBalances({ USDC: "0.00", EURC: "0.00", cirBTC: "0.00" });
+        if (!cancelled) setBalances((b) => ({ ...b, USDC: "0.00" }));
+      }
+
+      try {
+        const eBal = await withRpcRetry(() => eurc.balanceOf(wallet.address));
+        if (!cancelled) {
+          setBalances((b) => ({ ...b, EURC: ethers.formatUnits(eBal, TOKEN_DECIMALS.EURC) }));
+        }
+      } catch {
+        if (!cancelled) setBalances((b) => ({ ...b, EURC: "0.00" }));
+      }
+
+      try {
+        const bBal = await withRpcRetry(() => cirbtc.balanceOf(wallet.address));
+        if (!cancelled) {
+          setBalances((b) => ({ ...b, cirBTC: ethers.formatUnits(bBal, TOKEN_DECIMALS.cirBTC) }));
+        }
+      } catch {
+        if (!cancelled) setBalances((b) => ({ ...b, cirBTC: "0.00" }));
       }
     }
     loadBalances();
