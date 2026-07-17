@@ -536,7 +536,7 @@ function DashboardPage({ wallet }) {
         <div className="flex items-start justify-between flex-wrap gap-4">
           <div>
             <p className="text-white/50 text-sm mb-2">Total balance</p>
-            <p className="text-white text-5xl md:text-6xl font-bold tracking-tight tabular-nums">
+            <p className="text-white text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight tabular-nums break-all">
               {total === null ? "—" : `$${total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
             </p>
             <p className="text-white/30 text-xs mt-2">Your USDC balance (1 USDC ≈ $1)</p>
@@ -1303,7 +1303,7 @@ export default function ArcTestnetDApp() {
 
   return (
     <div className="min-h-screen bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
-      <header className="flex items-center justify-between px-6 py-4 border-b border-white/5">
+      <header className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-4 border-b border-white/5">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-400 to-purple-600" />
           <span className="text-white font-semibold tracking-tight">Arclify</span>
@@ -1321,25 +1321,26 @@ export default function ArcTestnetDApp() {
       </header>
 
       {!wallet.address && auth.sessionAddress && (
-        <div className="px-6 pt-3">
+        <div className="px-4 sm:px-6 pt-3">
           <p className="text-amber-300 text-xs">
             Signed in as {auth.sessionAddress.slice(0, 6)}…{auth.sessionAddress.slice(-4)}, but your wallet isn't connected in this tab — reconnect it to send transactions.
           </p>
         </div>
       )}
       {wallet.error && (
-        <div className="px-6 pt-3">
+        <div className="px-4 sm:px-6 pt-3">
           <p className="text-rose-300 text-xs">{wallet.error}</p>
         </div>
       )}
 
-      <div className="flex">
-        <nav className="w-48 shrink-0 p-4 space-y-1">
+      <div className="flex flex-col sm:flex-row">
+        {/* Horizontal scrollable pill nav on mobile; vertical sidebar from sm breakpoint up */}
+        <nav className="flex sm:flex-col gap-1 overflow-x-auto sm:overflow-visible whitespace-nowrap sm:whitespace-normal p-3 sm:p-4 sm:w-48 sm:shrink-0 sm:space-y-1 border-b sm:border-b-0 border-white/5">
           {NAV_ITEMS.map((item) => (
             <button
               key={item}
               onClick={() => setPage(item)}
-              className={`w-full text-left px-3 py-2 rounded-lg text-sm transition ${
+              className={`shrink-0 sm:w-full text-left px-3 py-2 rounded-lg text-sm transition ${
                 page === item
                   ? "bg-white/10 text-white"
                   : "text-white/50 hover:text-white/80 hover:bg-white/5"
@@ -1349,7 +1350,7 @@ export default function ArcTestnetDApp() {
             </button>
           ))}
         </nav>
-        <main className="flex-1 p-6">{pageEl}</main>
+        <main className="flex-1 p-4 sm:p-6 min-w-0">{pageEl}</main>
       </div>
     </div>
   );
