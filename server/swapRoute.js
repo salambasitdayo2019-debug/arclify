@@ -30,6 +30,31 @@ async function getServerAdapter() {
 }
 
 /**
+ * Arc Testnet's public RPC rate-limits aggressively under load. Circle's
+ * App Kit (via viem) polls it internally while waiting for a transaction
+ * receipt, and that poll can get rate-limited mid-swap even though the
+ * swap itself went through on-chain. Retrying the whole call is safe here
+ * because kit.swap/waitForSwap are idempotent status checks, not re-sends.
+ */
+async function withRpcRetry(fn, { retries = 4, baseDelayMs = 1200 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const isRateLimited =
+        /request limit reached/i.test(e?.message || "") ||
+        /rate limit/i.test(e?.message || "") ||
+        e?.code === -32005;
+      if (!isRateLimited || attempt === retries) throw e;
+      await new Promise((r) => setTimeout(r, baseDelayMs * (attempt + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * POST /api/estimate-swap
  * body: { chain, tokenIn, tokenOut, amountIn, slippageBps, walletAddress }
  */
@@ -65,20 +90,22 @@ router.post("/swap", async (req, res) => {
   const { chain, tokenIn, tokenOut, amountIn, slippageBps, walletAddress } = req.body;
   try {
     const adapter = await getServerAdapter();
-    const result = await kit.swap({
-      from: { adapter, chain },
-      tokenIn,
-      tokenOut,
-      amountIn,
-      slippageBps: slippageBps || 300,
-      to: walletAddress ? { recipientAddress: walletAddress } : undefined,
-      config: { kitKey: process.env.KIT_KEY },
-    });
+    const result = await withRpcRetry(() =>
+      kit.swap({
+        from: { adapter, chain },
+        tokenIn,
+        tokenOut,
+        amountIn,
+        slippageBps: slippageBps || 300,
+        to: walletAddress ? { recipientAddress: walletAddress } : undefined,
+        config: { kitKey: process.env.KIT_KEY },
+      })
+    );
 
     // Cross-chain swaps settle asynchronously — poll to a terminal state
     // before reporting back. Same-chain swaps are already terminal here.
     const final = chain !== "Arc_Testnet"
-      ? await kit.waitForSwap({ result, kitKey: process.env.KIT_KEY })
+      ? await withRpcRetry(() => kit.waitForSwap({ result, kitKey: process.env.KIT_KEY }))
       : result;
 
     res.json({
@@ -87,7 +114,12 @@ router.post("/swap", async (req, res) => {
       steps: final.steps,
     });
   } catch (err) {
-    res.status(400).json({ error: err.message || "Swap failed" });
+    const rateLimited = /request limit reached/i.test(err?.message || "");
+    res.status(400).json({
+      error: rateLimited
+        ? "The network was briefly overloaded confirming this swap. Your swap may have still gone through — check your balance or the block explorer before retrying to avoid a duplicate."
+        : err.message || "Swap failed",
+    });
   }
 });
 
