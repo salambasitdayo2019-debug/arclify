@@ -1199,7 +1199,7 @@ function LoginGate({ wallet, auth }) {
     <div className="min-h-screen flex items-center justify-center p-6 bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
       <GlassCard className="w-full max-w-md p-8">
         <div className="flex items-center justify-center gap-2 mb-2">
-          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-cyan-400 to-purple-600" />
+          <img src="/favicon.svg" alt="Arclify" className="w-9 h-9" />
           <span className="text-white text-lg font-semibold tracking-tight">Arclify</span>
         </div>
         <p className="text-white/50 text-sm text-center mb-6">
@@ -1305,7 +1305,7 @@ export default function ArcTestnetDApp() {
     <div className="min-h-screen bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
       <header className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-4 border-b border-white/5">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-400 to-purple-600" />
+          <img src="/favicon.svg" alt="Arclify" className="w-7 h-7" />
           <span className="text-white font-semibold tracking-tight">Arclify</span>
         </div>
         <div className="flex items-center gap-2">
