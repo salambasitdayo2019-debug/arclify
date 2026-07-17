@@ -178,27 +178,38 @@ function useWallet() {
   }, [rawProvider]);
 
   const connect = useCallback(
-    async (connectorId) => {
+    async (connectorId, { silent = false } = {}) => {
       const target = connectors.find((c) => c.id === connectorId);
       if (!target) {
-        setError("Choose a wallet to continue.");
+        if (!silent) setError("Choose a wallet to continue.");
         return null;
       }
-      setConnecting(true);
+      if (!silent) setConnecting(true);
       setError(null);
       try {
         let raw = target.raw;
         if (target.kind === "walletconnect") {
+          if (silent) return null; // WalletConnect manages its own session restore
           raw = await getWalletConnectProvider();
           await raw.connect();
         }
         const browserProvider = new ethers.BrowserProvider(raw);
-        const accounts =
-          target.kind === "walletconnect"
-            ? raw.accounts
-            : await browserProvider.send("eth_requestAccounts", []);
-        if (!accounts?.length) throw new Error("No account returned by wallet.");
-        if (target.kind === "injected") await switchToArc(raw);
+        let accounts;
+        if (target.kind === "walletconnect") {
+          accounts = raw.accounts;
+        } else if (silent) {
+          // eth_accounts never opens a popup — it just returns whatever
+          // accounts this site is already authorized to see, or an empty
+          // list if the wallet hasn't granted access (or was disconnected).
+          accounts = await browserProvider.send("eth_accounts", []);
+        } else {
+          accounts = await browserProvider.send("eth_requestAccounts", []);
+        }
+        if (!accounts?.length) {
+          if (silent) return null;
+          throw new Error("No account returned by wallet.");
+        }
+        if (target.kind === "injected" && !silent) await switchToArc(raw);
         const network = await browserProvider.getNetwork();
         setRawProvider(raw);
         setProvider(browserProvider);
@@ -206,10 +217,11 @@ function useWallet() {
         setChainId(Number(network.chainId));
         return { address: accounts[0], browserProvider };
       } catch (e) {
-        setError(e?.message || "Failed to connect wallet.");
-        throw e;
+        if (!silent) setError(e?.message || "Failed to connect wallet.");
+        if (!silent) throw e;
+        return null;
       } finally {
-        setConnecting(false);
+        if (!silent) setConnecting(false);
       }
     },
     [connectors]
@@ -265,7 +277,7 @@ function useAuth(wallet) {
     let cancelled = false;
     (async () => {
       try {
-        const { token, address } = JSON.parse(raw);
+        const { token, address, connectorId } = JSON.parse(raw);
         const res = await fetch(`${API_BASE}/auth/session`, {
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -273,6 +285,19 @@ function useAuth(wallet) {
         if (cancelled) return;
         setSessionAddress(address);
         setStatus("authenticated");
+
+        // Session is valid, but the wallet itself isn't connected in this
+        // tab yet (a page reload resets React state, not the wallet's own
+        // permission grant). Give injected wallets a moment to announce
+        // themselves via EIP-6963, then try a silent reconnect — this uses
+        // eth_accounts, which never shows a popup, so it only succeeds if
+        // the site is already authorized.
+        if (connectorId) {
+          setTimeout(async () => {
+            if (cancelled) return;
+            await wallet.connect(connectorId, { silent: true });
+          }, 500);
+        }
       } catch {
         localStorage.removeItem(SESSION_STORAGE_KEY);
         if (!cancelled) setStatus("loggedOut");
@@ -281,6 +306,7 @@ function useAuth(wallet) {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const login = useCallback(
@@ -314,7 +340,7 @@ function useAuth(wallet) {
 
         localStorage.setItem(
           SESSION_STORAGE_KEY,
-          JSON.stringify({ token, address })
+          JSON.stringify({ token, address, connectorId })
         );
         setSessionAddress(address);
         setStatus("authenticated");
