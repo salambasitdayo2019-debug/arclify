@@ -19,12 +19,24 @@ const ARC_TESTNET = {
 const CONTRACTS = {
   USDC: "0x3600000000000000000000000000000000000000",
   EURC: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+  cirBTC: "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF",
 };
 
 // Circle stablecoins (USDC, EURC) always use 6 decimals — hardcoding this
 // avoids an extra RPC round trip per token, which matters on Arc Testnet's
-// rate-limited public RPC.
+// rate-limited public RPC. cirBTC follows standard Bitcoin/WBTC precision
+// (8 decimals), same as Circle's own reference docs.
 const STABLECOIN_DECIMALS = 6;
+const CIRBTC_DECIMALS = 8;
+const TOKEN_DECIMALS = { EURC: STABLECOIN_DECIMALS, cirBTC: CIRBTC_DECIMALS };
+
+// IMPORTANT: ARC_TESTNET.nativeCurrency.decimals (6) is metadata used only
+// when registering the chain with a wallet (wallet_addEthereumChain) — it's
+// what MetaMask shows as a label. The actual raw balance returned by
+// eth_getBalance / provider.getBalance still follows the standard EVM
+// convention of 18 decimals, same as every other chain. Using 6 here would
+// inflate every native-currency amount by 10^12.
+const NATIVE_BALANCE_DECIMALS = 18;
 
 /**
  * Retries a Promise-returning RPC call with backoff when the node responds
@@ -463,7 +475,7 @@ const NAV_ITEMS = [
 /* ------------------------------------------------------------------ */
 
 function DashboardPage({ wallet }) {
-  const [balances, setBalances] = useState({ USDC: "—", EURC: "—" });
+  const [balances, setBalances] = useState({ USDC: "—", EURC: "—", cirBTC: "—" });
 
   useEffect(() => {
     let cancelled = false;
@@ -471,19 +483,22 @@ function DashboardPage({ wallet }) {
       if (!wallet.provider || !wallet.address) return;
       try {
         const eurc = new ethers.Contract(CONTRACTS.EURC, ERC20_ABI, wallet.provider);
+        const cirbtc = new ethers.Contract(CONTRACTS.cirBTC, ERC20_ABI, wallet.provider);
         // Sequential, not Promise.all — firing several calls at once is
         // exactly what trips Arc Testnet's public RPC rate limit.
         const nativeBal = await withRpcRetry(() =>
           wallet.provider.getBalance(wallet.address)
         );
         const eBal = await withRpcRetry(() => eurc.balanceOf(wallet.address));
+        const bBal = await withRpcRetry(() => cirbtc.balanceOf(wallet.address));
         if (cancelled) return;
         setBalances({
-          USDC: ethers.formatUnits(nativeBal, ARC_TESTNET.nativeCurrency.decimals),
-          EURC: ethers.formatUnits(eBal, STABLECOIN_DECIMALS),
+          USDC: ethers.formatUnits(nativeBal, NATIVE_BALANCE_DECIMALS),
+          EURC: ethers.formatUnits(eBal, TOKEN_DECIMALS.EURC),
+          cirBTC: ethers.formatUnits(bBal, TOKEN_DECIMALS.cirBTC),
         });
       } catch {
-        if (!cancelled) setBalances({ USDC: "0.00", EURC: "0.00" });
+        if (!cancelled) setBalances({ USDC: "0.00", EURC: "0.00", cirBTC: "0.00" });
       }
     }
     loadBalances();
@@ -495,8 +510,9 @@ function DashboardPage({ wallet }) {
   const usdcNum = Number(balances.USDC);
   const eurcNum = Number(balances.EURC);
   const hasBalances = balances.USDC !== "—" && !Number.isNaN(usdcNum);
-  // Rough combined total for the hero figure — USDC 1:1, EURC show separately
-  // in its own currency below since it isn't a real USD conversion.
+  // Rough combined total for the hero figure — USDC 1:1, EURC/cirBTC show
+  // separately in their own units below since they aren't real USD
+  // conversions (especially cirBTC, whose BTC price isn't tracked here).
   const total = hasBalances ? usdcNum : null;
 
   return (
@@ -509,7 +525,7 @@ function DashboardPage({ wallet }) {
             <p className="text-white text-5xl md:text-6xl font-bold tracking-tight tabular-nums">
               {total === null ? "—" : `$${total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
             </p>
-            <p className="text-white/30 text-xs mt-2">USDC balance shown as USD equivalent</p>
+            <p className="text-white/30 text-xs mt-2">Your USDC balance (1 USDC ≈ $1)</p>
           </div>
           <div className="flex flex-col items-end gap-2">
             <Pill tone={wallet.isOnArc ? "ok" : "warn"}>
@@ -523,7 +539,7 @@ function DashboardPage({ wallet }) {
       </GlassCard>
 
       {/* Individual token cards */}
-      <div className="grid sm:grid-cols-2 gap-4">
+      <div className="grid sm:grid-cols-3 gap-4">
         <GlassCard className="p-6">
           <div className="flex items-center justify-between mb-5">
             <span className="text-white/50 text-sm font-medium">USDC</span>
@@ -544,6 +560,17 @@ function DashboardPage({ wallet }) {
           </div>
           <p className="text-white text-3xl font-semibold tabular-nums">
             {balances.EURC}
+          </p>
+        </GlassCard>
+        <GlassCard className="p-6">
+          <div className="flex items-center justify-between mb-5">
+            <span className="text-white/50 text-sm font-medium">cirBTC</span>
+            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-orange-400 to-orange-600 flex items-center justify-center text-xs font-bold text-white">
+              ₿
+            </span>
+          </div>
+          <p className="text-white text-3xl font-semibold tabular-nums">
+            {balances.cirBTC}
           </p>
         </GlassCard>
       </div>
@@ -577,11 +604,11 @@ function TransferPage({ wallet }) {
       if (token === NATIVE_TOKEN_SYMBOL) {
         tx = await signer.sendTransaction({
           to,
-          value: ethers.parseUnits(amount, ARC_TESTNET.nativeCurrency.decimals),
+          value: ethers.parseUnits(amount, NATIVE_BALANCE_DECIMALS),
         });
       } else {
         const contract = new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
-        const decimals = STABLECOIN_DECIMALS;
+        const decimals = TOKEN_DECIMALS[token];
         tx = await contract.transfer(to, ethers.parseUnits(amount, decimals));
       }
       setStatus({ tone: "warn", msg: `Submitted: ${tx.hash}` });
@@ -604,6 +631,7 @@ function TransferPage({ wallet }) {
       >
         <option value="USDC">USDC</option>
         <option value="EURC">EURC</option>
+        <option value="cirBTC">cirBTC</option>
       </select>
       <label className="text-white/50 text-xs">Recipient address</label>
       <input
@@ -648,7 +676,7 @@ function BulkTransferPage({ wallet }) {
     const signer = await wallet.provider.getSigner();
     const isNative = token === NATIVE_TOKEN_SYMBOL;
     const contract = isNative ? null : new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
-    const decimals = isNative ? ARC_TESTNET.nativeCurrency.decimals : STABLECOIN_DECIMALS;
+    const decimals = isNative ? NATIVE_BALANCE_DECIMALS : TOKEN_DECIMALS[token];
     const results = [];
     for (const row of rows) {
       if (!ethers.isAddress(row.to) || !row.amount) continue;
@@ -676,6 +704,7 @@ function BulkTransferPage({ wallet }) {
       >
         <option value="USDC">USDC</option>
         <option value="EURC">EURC</option>
+        <option value="cirBTC">cirBTC</option>
       </select>
       {rows.map((row, i) => (
         <div key={i} className="flex gap-2 mb-2">
