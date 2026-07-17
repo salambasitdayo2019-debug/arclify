@@ -21,6 +21,36 @@ const CONTRACTS = {
   EURC: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
 };
 
+// Circle stablecoins (USDC, EURC) always use 6 decimals — hardcoding this
+// avoids an extra RPC round trip per token, which matters on Arc Testnet's
+// rate-limited public RPC.
+const STABLECOIN_DECIMALS = 6;
+
+/**
+ * Retries a Promise-returning RPC call with backoff when the node responds
+ * with a rate-limit error (seen on Arc Testnet's public RPC as JSON-RPC
+ * code -32005). Any other error is thrown immediately — we only want to
+ * absorb "you're going too fast," not mask real failures.
+ */
+async function withRpcRetry(fn, { retries = 3, baseDelayMs = 600 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const isRateLimited =
+        e?.code === -32005 ||
+        e?.error?.code === -32005 ||
+        /rate limit/i.test(e?.message || "") ||
+        /rate limit/i.test(e?.error?.message || "");
+      if (!isRateLimited || attempt === retries) throw e;
+      await new Promise((r) => setTimeout(r, baseDelayMs * (attempt + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 const API_BASE = import.meta?.env?.VITE_SWAP_API_BASE || "/api";
 const SESSION_STORAGE_KEY = "arclify_session";
 
@@ -436,24 +466,30 @@ function DashboardPage({ wallet }) {
   const [balances, setBalances] = useState({ USDC: "—", EURC: "—" });
 
   useEffect(() => {
+    let cancelled = false;
     async function loadBalances() {
       if (!wallet.provider || !wallet.address) return;
       try {
         const eurc = new ethers.Contract(CONTRACTS.EURC, ERC20_ABI, wallet.provider);
-        const [nativeBal, eBal, eDec] = await Promise.all([
-          wallet.provider.getBalance(wallet.address), // USDC = native currency
-          eurc.balanceOf(wallet.address),
-          eurc.decimals(),
-        ]);
+        // Sequential, not Promise.all — firing several calls at once is
+        // exactly what trips Arc Testnet's public RPC rate limit.
+        const nativeBal = await withRpcRetry(() =>
+          wallet.provider.getBalance(wallet.address)
+        );
+        const eBal = await withRpcRetry(() => eurc.balanceOf(wallet.address));
+        if (cancelled) return;
         setBalances({
           USDC: ethers.formatUnits(nativeBal, ARC_TESTNET.nativeCurrency.decimals),
-          EURC: ethers.formatUnits(eBal, eDec),
+          EURC: ethers.formatUnits(eBal, STABLECOIN_DECIMALS),
         });
       } catch {
-        setBalances({ USDC: "0.00", EURC: "0.00" });
+        if (!cancelled) setBalances({ USDC: "0.00", EURC: "0.00" });
       }
     }
     loadBalances();
+    return () => {
+      cancelled = true;
+    };
   }, [wallet.provider, wallet.address]);
 
   const usdcNum = Number(balances.USDC);
@@ -545,7 +581,7 @@ function TransferPage({ wallet }) {
         });
       } else {
         const contract = new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
-        const decimals = await contract.decimals();
+        const decimals = STABLECOIN_DECIMALS;
         tx = await contract.transfer(to, ethers.parseUnits(amount, decimals));
       }
       setStatus({ tone: "warn", msg: `Submitted: ${tx.hash}` });
@@ -612,7 +648,7 @@ function BulkTransferPage({ wallet }) {
     const signer = await wallet.provider.getSigner();
     const isNative = token === NATIVE_TOKEN_SYMBOL;
     const contract = isNative ? null : new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
-    const decimals = isNative ? ARC_TESTNET.nativeCurrency.decimals : await contract.decimals();
+    const decimals = isNative ? ARC_TESTNET.nativeCurrency.decimals : STABLECOIN_DECIMALS;
     const results = [];
     for (const row of rows) {
       if (!ethers.isAddress(row.to) || !row.amount) continue;
