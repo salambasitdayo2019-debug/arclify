@@ -44,7 +44,7 @@ const NATIVE_BALANCE_DECIMALS = 18;
  * code -32005). Any other error is thrown immediately — we only want to
  * absorb "you're going too fast," not mask real failures.
  */
-async function withRpcRetry(fn, { retries = 3, baseDelayMs = 600 } = {}) {
+async function withRpcRetry(fn, { retries = 5, baseDelayMs = 900 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -474,18 +474,25 @@ const NAV_ITEMS = [
 /*  Page: Dashboard                                                    */
 /* ------------------------------------------------------------------ */
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function DashboardPage({ wallet }) {
   const [balances, setBalances] = useState({ USDC: "—", EURC: "—", cirBTC: "—" });
+  const [loading, setLoading] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     async function loadBalances() {
       if (!wallet.provider || !wallet.address) return;
+      setLoading(true);
       const eurc = new ethers.Contract(CONTRACTS.EURC, ERC20_ABI, wallet.provider);
       const cirbtc = new ethers.Contract(CONTRACTS.cirBTC, ERC20_ABI, wallet.provider);
 
       // Each balance is fetched (and can fail) independently — one bad
-      // token shouldn't blank out the ones that succeeded.
+      // token shouldn't blank out the ones that succeeded. A short pause
+      // between calls (on top of the retry backoff inside each call)
+      // gives Arc Testnet's rate-limited public RPC more breathing room.
       try {
         const nativeBal = await withRpcRetry(() =>
           wallet.provider.getBalance(wallet.address)
@@ -497,6 +504,7 @@ function DashboardPage({ wallet }) {
         if (!cancelled) setBalances((b) => ({ ...b, USDC: "0.00" }));
       }
 
+      await sleep(400);
       try {
         const eBal = await withRpcRetry(() => eurc.balanceOf(wallet.address));
         if (!cancelled) {
@@ -506,6 +514,7 @@ function DashboardPage({ wallet }) {
         if (!cancelled) setBalances((b) => ({ ...b, EURC: "0.00" }));
       }
 
+      await sleep(400);
       try {
         const bBal = await withRpcRetry(() => cirbtc.balanceOf(wallet.address));
         if (!cancelled) {
@@ -514,12 +523,14 @@ function DashboardPage({ wallet }) {
       } catch {
         if (!cancelled) setBalances((b) => ({ ...b, cirBTC: "0.00" }));
       }
+
+      if (!cancelled) setLoading(false);
     }
     loadBalances();
     return () => {
       cancelled = true;
     };
-  }, [wallet.provider, wallet.address]);
+  }, [wallet.provider, wallet.address, refreshKey]);
 
   const usdcNum = Number(balances.USDC);
   const eurcNum = Number(balances.EURC);
@@ -542,9 +553,18 @@ function DashboardPage({ wallet }) {
             <p className="text-white/30 text-xs mt-2">Your USDC balance (1 USDC ≈ $1)</p>
           </div>
           <div className="flex flex-col items-end gap-2">
-            <Pill tone={wallet.isOnArc ? "ok" : "warn"}>
-              {wallet.isOnArc ? "Arc Testnet · 5042002" : "Wrong network"}
-            </Pill>
+            <div className="flex items-center gap-2">
+              <Pill tone={wallet.isOnArc ? "ok" : "warn"}>
+                {wallet.isOnArc ? "Arc Testnet · 5042002" : "Wrong network"}
+              </Pill>
+              <button
+                onClick={() => setRefreshKey((k) => k + 1)}
+                disabled={loading}
+                className="text-white/40 text-xs hover:text-white/70 disabled:opacity-40 disabled:cursor-not-allowed underline decoration-dotted"
+              >
+                {loading ? "Refreshing…" : "Refresh"}
+              </button>
+            </div>
             <p className="text-white/40 font-mono text-xs break-all text-right">
               {wallet.address ?? "Not connected"}
             </p>
@@ -1196,72 +1216,75 @@ function LoginGate({ wallet, auth }) {
   const injectedConnectors = wallet.connectors.filter((c) => c.kind === "injected");
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-6 bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
-      <GlassCard className="w-full max-w-md p-8">
-        <div className="flex items-center justify-center gap-2 mb-2">
-          <img src="/favicon.svg" alt="Arclify" className="w-9 h-9" />
-          <span className="text-white text-lg font-semibold tracking-tight">Arclify</span>
-        </div>
-        <p className="text-white/50 text-sm text-center mb-6">
-          Sign in with your wallet to open your Arc Testnet dashboard.
-        </p>
-
-        <label className="flex items-center gap-3 mb-5 px-4 py-3 rounded-xl border border-white/10 bg-white/5 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={notRobot}
-            onChange={(e) => setNotRobot(e.target.checked)}
-            className="w-4 h-4 accent-cyan-400"
-          />
-          <span className="text-white/80 text-sm">I am not a robot</span>
-        </label>
-
-        {!showPicker ? (
-          <PrimaryButton
-            className="w-full"
-            disabled={!notRobot}
-            onClick={() => setShowPicker(true)}
-          >
-            Continue
-          </PrimaryButton>
-        ) : (
-          <div className="space-y-2">
-            <p className="text-white/50 text-xs mb-1">Choose a wallet</p>
-            {wallet.connectors.map((c) => (
-              <button
-                key={c.id}
-                disabled={busy}
-                onClick={() => auth.login(c.id)}
-                className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition text-left disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {c.icon ? (
-                  <img src={c.icon} alt="" className="w-6 h-6 rounded" />
-                ) : (
-                  <div className="w-6 h-6 rounded bg-gradient-to-br from-cyan-400 to-purple-600" />
-                )}
-                <span className="text-white text-sm">{c.name}</span>
-              </button>
-            ))}
-            {injectedConnectors.length === 0 && (
-              <p className="text-white/40 text-xs pt-1">
-                No browser wallet extension detected — use WalletConnect above
-                to scan a QR code with any mobile wallet.
-              </p>
-            )}
+    <div className="min-h-screen flex flex-col bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
+      <div className="flex-1 flex items-center justify-center p-6">
+        <GlassCard className="w-full max-w-md p-8">
+          <div className="flex items-center justify-center gap-2 mb-2">
+            <img src="/favicon.svg" alt="Arclify" className="w-9 h-9" />
+            <span className="text-white text-lg font-semibold tracking-tight">Arclify</span>
           </div>
-        )}
+          <p className="text-white/50 text-sm text-center mb-6">
+            Sign in with your wallet to open your Arc Testnet dashboard.
+          </p>
 
-        {busy && (
-          <p className="text-cyan-300 text-xs text-center mt-4">
-            Confirm the connection, then sign the message in your wallet…
-          </p>
-        )}
-        {(auth.error || wallet.error) && (
-          <p className="text-rose-300 text-xs text-center mt-4">
-            {auth.error || wallet.error}
-          </p>
-        )}
-      </GlassCard>
+          <label className="flex items-center gap-3 mb-5 px-4 py-3 rounded-xl border border-white/10 bg-white/5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={notRobot}
+              onChange={(e) => setNotRobot(e.target.checked)}
+              className="w-4 h-4 accent-cyan-400"
+            />
+            <span className="text-white/80 text-sm">I am not a robot</span>
+          </label>
+
+          {!showPicker ? (
+            <PrimaryButton
+              className="w-full"
+              disabled={!notRobot}
+              onClick={() => setShowPicker(true)}
+            >
+              Continue
+            </PrimaryButton>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-white/50 text-xs mb-1">Choose a wallet</p>
+              {wallet.connectors.map((c) => (
+                <button
+                  key={c.id}
+                  disabled={busy}
+                  onClick={() => auth.login(c.id)}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition text-left disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {c.icon ? (
+                    <img src={c.icon} alt="" className="w-6 h-6 rounded" />
+                  ) : (
+                    <div className="w-6 h-6 rounded bg-gradient-to-br from-cyan-400 to-purple-600" />
+                  )}
+                  <span className="text-white text-sm">{c.name}</span>
+                </button>
+              ))}
+              {injectedConnectors.length === 0 && (
+                <p className="text-white/40 text-xs pt-1">
+                  No browser wallet extension detected — use WalletConnect above
+                  to scan a QR code with any mobile wallet.
+                </p>
+              )}
+            </div>
+          )}
+
+          {busy && (
+            <p className="text-cyan-300 text-xs text-center mt-4">
+              Confirm the connection, then sign the message in your wallet…
+            </p>
+          )}
+          {(auth.error || wallet.error) && (
+            <p className="text-rose-300 text-xs text-center mt-4">
+              {auth.error || wallet.error}
+            </p>
+          )}
+        </GlassCard>
+      </div>
+      <ContactFooter />
     </div>
   );
 }
@@ -1275,29 +1298,52 @@ const OWNER_INFO = {
   discord: "bash039630",
 };
 
+const WEB3_FACTS = [
+  "The first-ever NFT, \"Quantum,\" was minted by Kevin McCoy back in 2014 — years before the term \"NFT\" even existed.",
+  "Bitcoin's creator, Satoshi Nakamoto, is estimated to hold around 1 million BTC that has never moved.",
+  "Ethereum's 2022 \"Merge\" cut the network's energy use by over 99% overnight by switching from mining to staking.",
+  "A stablecoin like USDC aims to always equal $1 by holding real cash and short-term reserves behind every token issued.",
+  "The Bitcoin whitepaper is only nine pages long, yet it launched an entire industry.",
+  "Gas fees are named after the idea of \"fuel\" — every operation on a blockchain costs a small amount to computationally process.",
+  "Wallets like MetaMask never actually store your crypto — they store the keys that prove it's yours on the blockchain.",
+  "The word \"HODL\" came from a 2013 typo of \"hold\" in a Bitcoin forum post, and it's been crypto slang ever since.",
+];
+
 function WelcomeOverlay({ onDismiss }) {
+  const fact = useMemo(
+    () => WEB3_FACTS[Math.floor(Math.random() * WEB3_FACTS.length)],
+    []
+  );
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm">
       <GlassCard className="w-full max-w-sm p-7 text-center">
         <img src="/favicon.svg" alt="Arclify" className="w-10 h-10 mx-auto mb-4" />
-        <p className="text-white/50 text-sm mb-1">Welcome to Arclify</p>
-        <p className="text-white text-xl font-semibold mb-4">{OWNER_INFO.name}</p>
-        <div className="space-y-2 mb-5">
-          <a
-            href={OWNER_INFO.xUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="block text-cyan-300 text-sm hover:text-cyan-200"
-          >
-            {OWNER_INFO.xHandle}
-          </a>
-          <p className="text-white/50 text-sm">Discord: {OWNER_INFO.discord}</p>
-        </div>
+        <p className="text-white/50 text-sm mb-3">Did you know?</p>
+        <p className="text-white text-base leading-relaxed mb-6">{fact}</p>
         <PrimaryButton onClick={onDismiss} className="w-full">
           Continue
         </PrimaryButton>
       </GlassCard>
     </div>
+  );
+}
+
+function ContactFooter() {
+  return (
+    <footer className="px-4 sm:px-6 py-5 text-center border-t border-white/5">
+      <p className="text-white/30 text-xs">
+        Built by {OWNER_INFO.name} ·{" "}
+        <a
+          href={OWNER_INFO.xUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-white/40 hover:text-cyan-300"
+        >
+          {OWNER_INFO.xHandle}
+        </a>{" "}
+        · Discord: {OWNER_INFO.discord}
+      </p>
+    </footer>
   );
 }
 
@@ -1398,6 +1444,7 @@ export default function ArcTestnetDApp() {
         </nav>
         <main className="flex-1 p-4 sm:p-6 min-w-0">{pageEl}</main>
       </div>
+      <ContactFooter />
     </div>
   );
 }
