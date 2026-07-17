@@ -1266,6 +1266,41 @@ function LoginGate({ wallet, auth }) {
   );
 }
 
+const WELCOME_SEEN_KEY = "arclify_welcomed";
+
+const OWNER_INFO = {
+  name: "Salam Basit",
+  xUrl: "https://x.com/callmebashrc",
+  xHandle: "@callmebashrc",
+  discord: "bash039630",
+};
+
+function WelcomeOverlay({ onDismiss }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm">
+      <GlassCard className="w-full max-w-sm p-7 text-center">
+        <img src="/favicon.svg" alt="Arclify" className="w-10 h-10 mx-auto mb-4" />
+        <p className="text-white/50 text-sm mb-1">Welcome to Arclify</p>
+        <p className="text-white text-xl font-semibold mb-4">{OWNER_INFO.name}</p>
+        <div className="space-y-2 mb-5">
+          <a
+            href={OWNER_INFO.xUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block text-cyan-300 text-sm hover:text-cyan-200"
+          >
+            {OWNER_INFO.xHandle}
+          </a>
+          <p className="text-white/50 text-sm">Discord: {OWNER_INFO.discord}</p>
+        </div>
+        <PrimaryButton onClick={onDismiss} className="w-full">
+          Continue
+        </PrimaryButton>
+      </GlassCard>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  App shell                                                           */
 /* ------------------------------------------------------------------ */
@@ -1274,6 +1309,16 @@ export default function ArcTestnetDApp() {
   const wallet = useWallet();
   const auth = useAuth(wallet);
   const [page, setPage] = useState("Dashboard");
+  const [showWelcome, setShowWelcome] = useState(false);
+
+  // Show the welcome card exactly once, right after a successful sign-in —
+  // never again after that, even across future logins on this browser.
+  useEffect(() => {
+    if (auth.status !== "authenticated") return;
+    if (localStorage.getItem(WELCOME_SEEN_KEY)) return;
+    localStorage.setItem(WELCOME_SEEN_KEY, "1");
+    setShowWelcome(true);
+  }, [auth.status]);
 
   const pageEl = useMemo(() => {
     switch (page) {
@@ -1303,6 +1348,7 @@ export default function ArcTestnetDApp() {
 
   return (
     <div className="min-h-screen bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
+      {showWelcome && <WelcomeOverlay onDismiss={() => setShowWelcome(false)} />}
       <header className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-4 border-b border-white/5">
         <div className="flex items-center gap-2">
           <img src="/favicon.svg" alt="Arclify" className="w-7 h-7" />
