@@ -11,7 +11,13 @@ const ARC_TESTNET = {
   chainIdHex: "0x4CEF52", // 5042002
   chainId: 5042002,
   chainName: "Arc Testnet",
-  nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 6 },
+  // MetaMask (and other wallets) strictly require nativeCurrency.decimals
+  // to be 18 for any chain registered via wallet_addEthereumChain — this
+  // isn't optional metadata, it's enforced validation. This also matches
+  // the raw balance math we verified directly against Arc Testnet: even
+  // though Arc's own docs describe USDC as "6 decimals" at a conceptual
+  // level, eth_getBalance still returns standard 18-decimal wei units.
+  nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
   rpcUrls: ["https://rpc.testnet.arc.network"],
   blockExplorerUrls: ["https://testnet.arcscan.app"],
 };
