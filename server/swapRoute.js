@@ -14,6 +14,7 @@
  */
 
 import express from "express";
+import { ethers } from "ethers";
 import { AppKit } from "@circle-fin/app-kit"; // adjust to actual package name/version you install
 import { createViemAdapterFromPrivateKey } from "@circle-fin/adapter-viem-v2";
 
@@ -22,6 +23,16 @@ const router = express.Router();
 const kit = new AppKit({
   // developerFee / other global config can go here if you want to monetize swaps
 });
+
+// Only what's needed to read the signer's own public balances — no signing
+// capability here, this is a completely separate, read-only provider.
+const ARC_RPC_URL = "https://rpc.testnet.arc.network";
+const EURC_ADDRESS = "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a";
+const ERC20_BALANCE_ABI = [
+  "function balanceOf(address owner) view returns (uint256)",
+  "function decimals() view returns (uint8)",
+];
+const LOW_BALANCE_THRESHOLD = Number(process.env.SWAP_LOW_BALANCE_THRESHOLD || 5);
 
 async function getServerAdapter() {
   return createViemAdapterFromPrivateKey({
@@ -124,3 +135,39 @@ router.post("/swap", async (req, res) => {
 });
 
 export default router;
+
+/**
+ * GET /api/swap/signer-status
+ *
+ * Reports the swap signer wallet's PUBLIC address and current USDC/EURC
+ * balances so the frontend can warn users before they hit a failed swap
+ * due to thin liquidity — without ever exposing the private key itself.
+ * Deriving the address from the private key is safe (that's the whole
+ * point of a public/private keypair); only the key itself is secret.
+ */
+router.get("/swap/signer-status", async (req, res) => {
+  if (!process.env.SWAP_SIGNER_PRIVATE_KEY) {
+    return res.status(500).json({ error: "Signer wallet is not configured." });
+  }
+  try {
+    const provider = new ethers.JsonRpcProvider(ARC_RPC_URL);
+    const signerAddress = new ethers.Wallet(process.env.SWAP_SIGNER_PRIVATE_KEY).address;
+    const eurc = new ethers.Contract(EURC_ADDRESS, ERC20_BALANCE_ABI, provider);
+
+    const nativeBalRaw = await provider.getBalance(signerAddress);
+    const eurcBalRaw = await eurc.balanceOf(signerAddress);
+
+    const usdc = Number(ethers.formatUnits(nativeBalRaw, 18)); // native currency uses 18-decimal raw units
+    const eurcBal = Number(ethers.formatUnits(eurcBalRaw, 6));
+
+    res.json({
+      address: signerAddress,
+      usdc,
+      eurc: eurcBal,
+      lowBalance: usdc < LOW_BALANCE_THRESHOLD || eurcBal < LOW_BALANCE_THRESHOLD,
+      threshold: LOW_BALANCE_THRESHOLD,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Could not check signer balance." });
+  }
+});
