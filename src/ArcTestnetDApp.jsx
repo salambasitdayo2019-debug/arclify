@@ -78,6 +78,8 @@ async function withRpcRetry(fn, { retries = 5, baseDelayMs = 900 } = {}) {
 
 const API_BASE = import.meta?.env?.VITE_SWAP_API_BASE || "/api";
 const SESSION_STORAGE_KEY = "arclify_session";
+const CIRCLE_SESSION_STORAGE_KEY = "arclify_circle_session";
+const CIRCLE_APP_ID = import.meta?.env?.VITE_CIRCLE_APP_ID;
 
 // USDC is Arc Testnet's native currency (like ETH on mainnet) — it does NOT
 // live at an ERC-20 contract address, so balances/sends for it must go
@@ -439,6 +441,162 @@ function useAuth(wallet) {
   }, [wallet]);
 
   return { status, error, sessionAddress, login, logout };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Circle User-Controlled Wallets — Phase 1 (email + PIN login,        */
+/*  wallet creation, balance display). Transfer/Swap/NFT Lock for       */
+/*  Circle-wallet users is Phase 2 — those actions need Circle's        */
+/*  transaction-challenge system, not ethers.js signing, so the pages   */
+/*  below show a "coming soon" state for this wallet type for now.      */
+/* ------------------------------------------------------------------ */
+
+function useCircleWallet() {
+  const [status, setStatus] = useState("idle"); // idle | working | pinChallenge | ready | error
+  const [error, setError] = useState(null);
+  const [address, setAddress] = useState(null);
+  const [walletId, setWalletId] = useState(null);
+  const [balance, setBalance] = useState(null);
+  const sdkRef = useRef(null);
+  const sessionRef = useRef(null); // { userId, userToken, encryptionKey }
+
+  const getSdk = useCallback(() => {
+    if (!sdkRef.current) {
+      sdkRef.current = new W3SSdk({ appSettings: { appId: CIRCLE_APP_ID } });
+    }
+    return sdkRef.current;
+  }, []);
+
+  const loadWalletAndBalance = useCallback(async (userToken) => {
+    const walletsRes = await fetch(`${API_BASE}/circle/wallets?userToken=${encodeURIComponent(userToken)}`);
+    if (!walletsRes.ok) throw new Error("Could not load wallet.");
+    const { wallets } = await walletsRes.json();
+    const primary = wallets?.[0];
+    if (!primary) return null;
+    setAddress(primary.address);
+    setWalletId(primary.id);
+
+    const balRes = await fetch(`${API_BASE}/circle/balance?userToken=${encodeURIComponent(userToken)}&walletId=${primary.id}`);
+    if (balRes.ok) {
+      const { tokenBalances } = await balRes.json();
+      const usdc = tokenBalances?.find((t) => (t.token?.symbol || "").startsWith("USDC"));
+      setBalance(usdc?.amount ?? "0");
+    }
+    return primary;
+  }, []);
+
+  // Restore session on page load
+  useEffect(() => {
+    const raw = localStorage.getItem(CIRCLE_SESSION_STORAGE_KEY);
+    if (!raw) return;
+    try {
+      const session = JSON.parse(raw);
+      sessionRef.current = session;
+      setStatus("working");
+      loadWalletAndBalance(session.userToken)
+        .then((w) => setStatus(w ? "ready" : "idle"))
+        .catch(() => {
+          localStorage.removeItem(CIRCLE_SESSION_STORAGE_KEY);
+          setStatus("idle");
+        });
+    } catch {
+      localStorage.removeItem(CIRCLE_SESSION_STORAGE_KEY);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loginWithEmail = useCallback(
+    async (email) => {
+      if (!CIRCLE_APP_ID) {
+        setError("Circle Wallets isn't configured yet (missing App ID).");
+        return;
+      }
+      const userId = email.trim().toLowerCase();
+      if (!userId || !userId.includes("@")) {
+        setError("Enter a valid email address.");
+        return;
+      }
+      setStatus("working");
+      setError(null);
+      try {
+        // Create the user (idempotent-ish — Circle errors if it already
+        // exists, which is fine, we just continue to the token step).
+        await fetch(`${API_BASE}/circle/create-user`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId }),
+        }).catch(() => {});
+
+        const tokenRes = await fetch(`${API_BASE}/circle/user-token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId }),
+        });
+        if (!tokenRes.ok) throw new Error("Could not start sign-in. Try again.");
+        const { userToken, encryptionKey } = await tokenRes.json();
+        sessionRef.current = { userId, userToken, encryptionKey };
+
+        const initRes = await fetch(`${API_BASE}/circle/initialize-user`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userToken }),
+        });
+        const initData = await initRes.json();
+
+        if (initRes.ok && initData.challengeId) {
+          // First time for this user — Circle needs them to set a PIN via
+          // its own hosted popup before the wallet is actually created.
+          setStatus("pinChallenge");
+          const sdk = getSdk();
+          sdk.setAuthentication({ userToken, encryptionKey });
+          sdk.execute(initData.challengeId, async (err) => {
+            if (err) {
+              setError(err?.message || "PIN setup was cancelled or failed.");
+              setStatus("idle");
+              return;
+            }
+            try {
+              await new Promise((r) => setTimeout(r, 2000)); // give Circle a moment to index the new wallet
+              const w = await loadWalletAndBalance(userToken);
+              localStorage.setItem(CIRCLE_SESSION_STORAGE_KEY, JSON.stringify(sessionRef.current));
+              setStatus(w ? "ready" : "error");
+            } catch (e) {
+              setError(e.message);
+              setStatus("error");
+            }
+          });
+        } else if (initData.code === 155106) {
+          // Already initialized in a previous session — just load it.
+          const w = await loadWalletAndBalance(userToken);
+          localStorage.setItem(CIRCLE_SESSION_STORAGE_KEY, JSON.stringify(sessionRef.current));
+          setStatus(w ? "ready" : "error");
+        } else {
+          throw new Error(initData.error || initData.message || "Could not initialize wallet.");
+        }
+      } catch (e) {
+        setError(e.message || "Sign-in failed. Please try again.");
+        setStatus("idle");
+      }
+    },
+    [getSdk, loadWalletAndBalance]
+  );
+
+  const logout = useCallback(() => {
+    localStorage.removeItem(CIRCLE_SESSION_STORAGE_KEY);
+    sessionRef.current = null;
+    setAddress(null);
+    setWalletId(null);
+    setBalance(null);
+    setStatus("idle");
+  }, []);
+
+  const refreshBalance = useCallback(() => {
+    if (sessionRef.current?.userToken) {
+      loadWalletAndBalance(sessionRef.current.userToken).catch(() => {});
+    }
+  }, [loadWalletAndBalance]);
+
+  return { status, error, address, walletId, balance, loginWithEmail, logout, refreshBalance };
 }
 
 /* ------------------------------------------------------------------ */
