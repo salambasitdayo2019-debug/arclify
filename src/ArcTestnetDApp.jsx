@@ -1542,6 +1542,13 @@ function LoginGate({ wallet, auth }) {
                   to scan a QR code with any mobile wallet.
                 </p>
               )}
+              {isMobileDevice() && injectedConnectors.length > 0 && (
+                <p className="text-white/40 text-xs pt-1">
+                  On a phone, WalletConnect tends to be the more reliable choice
+                  — an injected option like MetaMask can silently fail to return
+                  after switching apps to approve.
+                </p>
+              )}
             </div>
           )}
 
@@ -1576,6 +1583,13 @@ function LoginGate({ wallet, auth }) {
       <ContactFooter />
     </div>
   );
+}
+
+// Simple mobile detection — good enough to steer the UI hint, doesn't
+// need to be bulletproof since it's advisory copy, not a hard gate.
+function isMobileDevice() {
+  if (typeof navigator === "undefined") return false;
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
 const WELCOME_SEEN_KEY = "arclify_welcomed";
