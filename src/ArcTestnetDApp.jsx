@@ -878,8 +878,22 @@ function SwapPage({ wallet }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [errorMsg, setErrorMsg] = useState(null);
+  const [signerStatus, setSignerStatus] = useState(null);
 
   const tokenOptions = SWAP_SUPPORTED_TESTNET_TOKENS;
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${SWAP_API_BASE}/swap/signer-status`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled && data) setSignerStatus(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleEstimate = useCallback(async () => {
     setErrorMsg(null);
@@ -963,6 +977,15 @@ function SwapPage({ wallet }) {
       <p className="text-white/40 text-xs mb-4">
         Runs server-side via Circle App Kit — client-side Swap isn't available yet.
       </p>
+
+      {signerStatus?.lowBalance && (
+        <div className="mb-4 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-950/40">
+          <p className="text-amber-300 text-xs">
+            The swap wallet is running low ({signerStatus.usdc.toFixed(2)} USDC,{" "}
+            {signerStatus.eurc.toFixed(2)} EURC) — swaps may fail until it's topped up.
+          </p>
+        </div>
+      )}
 
       <div className="flex gap-2 mb-3">
         <div className="flex-1">
