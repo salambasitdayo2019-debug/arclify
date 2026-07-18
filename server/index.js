@@ -15,6 +15,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import swapRoute from "./swapRoute.js";
 import authRoute from "./authRoute.js";
+import circleWalletsRoute from "./circleWalletsRoute.js";
 
 dotenv.config();
 
@@ -30,6 +31,11 @@ if (!process.env.JWT_SECRET) {
     "Warning: JWT_SECRET is not set. Wallet sign-in (/api/auth/*) will fail until it's set in .env."
   );
 }
+if (!process.env.CIRCLE_API_KEY) {
+  console.warn(
+    "Warning: CIRCLE_API_KEY is not set. Circle Wallets sign-in (/api/circle/*) will fail until it's set in .env."
+  );
+}
 
 const app = express();
 
@@ -42,6 +48,7 @@ app.get("/api/health", (_req, res) => {
 
 app.use("/api", swapRoute);
 app.use("/api", authRoute);
+app.use("/api", circleWalletsRoute);
 
 // Fallback error handler so a thrown error doesn't crash the process
 app.use((err, _req, res, _next) => {
