@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { ethers } from "ethers";
+import QRCode from "qrcode";
 import { useInjectedWallets } from "./wallet/eip6963";
 import { getWalletConnectProvider } from "./wallet/walletConnectProvider";
 
@@ -315,6 +316,7 @@ function useWallet() {
     connectors,
     connect,
     disconnect,
+    qrUri,
     isOnArc: chainId === ARC_TESTNET.chainId,
   };
 }
@@ -1804,6 +1806,23 @@ function WalletProfilePage({ wallet }) {
 /*  message to prove ownership -> app unlocks.                          */
 /* ------------------------------------------------------------------ */
 
+function QrCodeImage({ value }) {
+  const [dataUrl, setDataUrl] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    QRCode.toDataURL(value, { width: 240, margin: 1 })
+      .then((url) => { if (!cancelled) setDataUrl(url); })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [value]);
+
+  if (!dataUrl) return <Skeleton className="w-60 h-60 mx-auto" />;
+  return <img src={dataUrl} alt="WalletConnect QR code" className="mx-auto rounded-lg" />;
+}
+
 function LoginGate({ wallet, auth }) {
   const [notRobot, setNotRobot] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
@@ -1842,34 +1861,51 @@ function LoginGate({ wallet, auth }) {
             </PrimaryButton>
           ) : (
             <div className="space-y-2">
-              <p className="text-white/50 text-xs mb-1">Choose a wallet</p>
-              {wallet.connectors.map((c) => (
-                <button
-                  key={c.id}
-                  disabled={busy}
-                  onClick={() => auth.login(c.id)}
-                  className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition text-left disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {c.icon ? (
-                    <img src={c.icon} alt="" className="w-6 h-6 rounded" />
-                  ) : (
-                    <div className="w-6 h-6 rounded bg-gradient-to-br from-cyan-400 to-purple-600" />
+              {wallet.qrUri ? (
+                <div className="text-center py-2">
+                  <p className="text-white/50 text-xs mb-3">
+                    Scan with any WalletConnect-compatible wallet app
+                  </p>
+                  <QrCodeImage value={wallet.qrUri} />
+                  <a
+                    href={wallet.qrUri}
+                    className="block mt-3 text-cyan-300 text-xs hover:text-cyan-200"
+                  >
+                    Or tap to open in a wallet app
+                  </a>
+                </div>
+              ) : (
+                <>
+                  <p className="text-white/50 text-xs mb-1">Choose a wallet</p>
+                  {wallet.connectors.map((c) => (
+                    <button
+                      key={c.id}
+                      disabled={busy}
+                      onClick={() => auth.login(c.id)}
+                      className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition text-left disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {c.icon ? (
+                        <img src={c.icon} alt="" className="w-6 h-6 rounded" />
+                      ) : (
+                        <div className="w-6 h-6 rounded bg-gradient-to-br from-cyan-400 to-purple-600" />
+                      )}
+                      <span className="text-white text-sm">{c.name}</span>
+                    </button>
+                  ))}
+                  {injectedConnectors.length === 0 && (
+                    <p className="text-white/40 text-xs pt-1">
+                      No browser wallet extension detected — use WalletConnect above
+                      to scan a QR code with any mobile wallet.
+                    </p>
                   )}
-                  <span className="text-white text-sm">{c.name}</span>
-                </button>
-              ))}
-              {injectedConnectors.length === 0 && (
-                <p className="text-white/40 text-xs pt-1">
-                  No browser wallet extension detected — use WalletConnect above
-                  to scan a QR code with any mobile wallet.
-                </p>
-              )}
-              {isMobileDevice() && injectedConnectors.length > 0 && (
-                <p className="text-white/40 text-xs pt-1">
-                  On a phone, WalletConnect tends to be the more reliable choice
-                  — an injected option like MetaMask can silently fail to return
-                  after switching apps to approve.
-                </p>
+                  {isMobileDevice() && injectedConnectors.length > 0 && (
+                    <p className="text-white/40 text-xs pt-1">
+                      On a phone, WalletConnect tends to be the more reliable choice
+                      — an injected option like MetaMask can silently fail to return
+                      after switching apps to approve.
+                    </p>
+                  )}
+                </>
               )}
             </div>
           )}
