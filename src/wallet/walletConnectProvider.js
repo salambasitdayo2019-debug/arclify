@@ -26,7 +26,11 @@ export function getWalletConnectProvider() {
       projectId,
       chains: [ARC_TESTNET_CHAIN_ID],
       optionalChains: [1],
-      showQrModal: true,
+      // Disabled: WalletConnect's built-in QR modal depends on @reown/appkit
+      // bundling correctly, which has proven unreliable through Vite/Vercel
+      // builds. We render our own QR code from the 'display_uri' event
+      // instead — see useWallet's connect() in ArcTestnetDApp.jsx.
+      showQrModal: false,
       metadata: {
         name: "Arclify",
         description: "Arc Testnet DeFi dashboard",
