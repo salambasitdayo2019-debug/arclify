@@ -200,6 +200,7 @@ function useWallet() {
   const [provider, setProvider] = useState(null);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState(null);
+  const [qrUri, setQrUri] = useState(null);
 
   const connectors = useMemo(() => {
     const list = injected.map((p) => ({
@@ -246,7 +247,14 @@ function useWallet() {
         if (target.kind === "walletconnect") {
           if (silent) return null; // WalletConnect manages its own session restore
           raw = await getWalletConnectProvider();
-          await raw.connect();
+          const onDisplayUri = (uri) => setQrUri(uri);
+          raw.on("display_uri", onDisplayUri);
+          try {
+            await raw.connect();
+          } finally {
+            raw.removeListener?.("display_uri", onDisplayUri);
+            setQrUri(null);
+          }
         }
         const browserProvider = new ethers.BrowserProvider(raw);
         let accounts;
@@ -527,6 +535,320 @@ function ToastViewport() {
         </div>
       ))}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Command bar — type a plain-English instruction, it parses and       */
+/*  executes it directly, no need to visit the matching page first.     */
+/*  Pattern-matching only (no AI/API calls), so it's free and instant,  */
+/*  but only understands the phrasings listed in COMMAND_EXAMPLES.      */
+/* ------------------------------------------------------------------ */
+
+const TOKEN_ALIASES = { usdc: "USDC", eurc: "EURC", cirbtc: "cirBTC" };
+
+const COMMAND_EXAMPLES = [
+  "send 20 USDC to 0x1234...5678",
+  "swap 10 USDC to EURC",
+  "mint an nft",
+  "lock nft 5 for 7 days",
+  "withdraw lock 3",
+  "bulk send 5 USDC to 0xabc..., 0xdef...",
+  "check my balance",
+  "go to history",
+];
+
+function parseCommand(raw) {
+  const text = raw.trim();
+
+  const sendMatch = text.match(/send\s+([\d.]+)\s+(usdc|eurc|cirbtc)\s+to\s+(0x[a-fA-F0-9]{40})/i);
+  if (sendMatch) {
+    return {
+      action: "send",
+      amount: sendMatch[1],
+      token: TOKEN_ALIASES[sendMatch[2].toLowerCase()],
+      to: sendMatch[3],
+    };
+  }
+
+  const bulkMatch = text.match(/bulk\s*send\s+([\d.]+)\s+(usdc|eurc|cirbtc)\s+to\s+((?:0x[a-fA-F0-9]{40}[\s,]*)+)/i);
+  if (bulkMatch) {
+    const addresses = bulkMatch[3].match(/0x[a-fA-F0-9]{40}/g) || [];
+    if (addresses.length > 0) {
+      return {
+        action: "bulkSend",
+        amount: bulkMatch[1],
+        token: TOKEN_ALIASES[bulkMatch[2].toLowerCase()],
+        addresses,
+      };
+    }
+  }
+
+  const swapMatch = text.match(/swap\s+([\d.]+)\s+(usdc|eurc|cirbtc)\s+(?:to|for|into)\s+(usdc|eurc|cirbtc)/i);
+  if (swapMatch) {
+    return {
+      action: "swap",
+      amount: swapMatch[1],
+      tokenIn: TOKEN_ALIASES[swapMatch[2].toLowerCase()],
+      tokenOut: TOKEN_ALIASES[swapMatch[3].toLowerCase()],
+    };
+  }
+
+  if (/mint\s+(?:an?\s+)?nft/i.test(text)) {
+    return { action: "mintNft" };
+  }
+
+  const lockMatch = text.match(/lock\s+nft\s+(\d+)\s+for\s+(\d+)\s*days?/i);
+  if (lockMatch) {
+    return { action: "lockNft", tokenId: lockMatch[1], days: lockMatch[2] };
+  }
+
+  const withdrawMatch = text.match(/withdraw\s+(?:nft\s+)?lock\s+(\d+)/i);
+  if (withdrawMatch) {
+    return { action: "withdrawLock", lockId: withdrawMatch[1] };
+  }
+
+  if (/balance/i.test(text)) {
+    return { action: "navigate", page: "Dashboard" };
+  }
+
+  const navMatch = text.match(/(?:go to|open|show)\s+(dashboard|transfer|bulk transfer|swap|nft lock|history|leaderboard|wallet profile)/i);
+  if (navMatch) {
+    const page = NAV_ITEMS.find((p) => p.toLowerCase() === navMatch[1].toLowerCase());
+    if (page) return { action: "navigate", page };
+  }
+
+  return null;
+}
+
+function describeCommand(cmd) {
+  if (cmd.action === "send") return `Send ${cmd.amount} ${cmd.token} to ${cmd.to.slice(0, 8)}…${cmd.to.slice(-6)}`;
+  if (cmd.action === "bulkSend") return `Send ${cmd.amount} ${cmd.token} to ${cmd.addresses.length} address(es)`;
+  if (cmd.action === "swap") return `Swap ${cmd.amount} ${cmd.tokenIn} → ${cmd.tokenOut}`;
+  if (cmd.action === "mintNft") return "Mint a new NFT";
+  if (cmd.action === "lockNft") return `Lock NFT #${cmd.tokenId} for ${cmd.days} day(s)`;
+  if (cmd.action === "withdrawLock") return `Withdraw lock #${cmd.lockId}`;
+  if (cmd.action === "navigate") return `Open ${cmd.page}`;
+  return "";
+}
+
+function CommandBar({ wallet, onNavigate }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [parsed, setParsed] = useState(null);
+  const [error, setError] = useState(null);
+  const [running, setRunning] = useState(false);
+
+  const handleParse = useCallback(() => {
+    setError(null);
+    const result = parseCommand(text);
+    if (!result) {
+      setError("Didn't recognize that — try one of the example phrasings below.");
+      setParsed(null);
+      return;
+    }
+    setParsed(result);
+  }, [text]);
+
+  const reset = useCallback(() => {
+    setText("");
+    setParsed(null);
+    setError(null);
+    setOpen(false);
+  }, []);
+
+  const runCommand = useCallback(async () => {
+    if (!parsed) return;
+
+    if (parsed.action === "navigate") {
+      onNavigate(parsed.page);
+      reset();
+      return;
+    }
+
+    if (!wallet.provider || !wallet.address) {
+      setError("Connect your wallet first.");
+      return;
+    }
+
+    setRunning(true);
+    try {
+      if (parsed.action === "send") {
+        const signer = await wallet.provider.getSigner();
+        let tx;
+        if (parsed.token === NATIVE_TOKEN_SYMBOL) {
+          tx = await signer.sendTransaction({
+            to: parsed.to,
+            value: ethers.parseUnits(parsed.amount, NATIVE_BALANCE_DECIMALS),
+          });
+        } else {
+          const contract = new ethers.Contract(CONTRACTS[parsed.token], ERC20_ABI, signer);
+          tx = await contract.transfer(parsed.to, ethers.parseUnits(parsed.amount, TOKEN_DECIMALS[parsed.token]));
+        }
+        toast({ tone: "warn", title: "Transaction submitted", message: `${tx.hash.slice(0, 18)}…` });
+        await tx.wait();
+        pushTx({ type: "Transfer", token: parsed.token, to: parsed.to, amount: parsed.amount, txHash: tx.hash, status: "confirmed" });
+        toast({ tone: "ok", title: "Command complete", message: describeCommand(parsed) });
+      } else if (parsed.action === "bulkSend") {
+        const signer = await wallet.provider.getSigner();
+        const isNative = parsed.token === NATIVE_TOKEN_SYMBOL;
+        const contract = isNative ? null : new ethers.Contract(CONTRACTS[parsed.token], ERC20_ABI, signer);
+        const decimals = isNative ? NATIVE_BALANCE_DECIMALS : TOKEN_DECIMALS[parsed.token];
+        let succeeded = 0;
+        let failed = 0;
+        for (const addr of parsed.addresses) {
+          try {
+            const tx = isNative
+              ? await signer.sendTransaction({ to: addr, value: ethers.parseUnits(parsed.amount, decimals) })
+              : await contract.transfer(addr, ethers.parseUnits(parsed.amount, decimals));
+            await tx.wait();
+            succeeded++;
+          } catch {
+            failed++;
+          }
+        }
+        writeLS(LS_KEYS.bulk, [{ id: crypto.randomUUID(), token: parsed.token, rows: parsed.addresses.map((to) => ({ to, amount: parsed.amount })), timestamp: Date.now() }, ...readLS(LS_KEYS.bulk, [])]);
+        toast({
+          tone: failed === 0 ? "ok" : succeeded === 0 ? "bad" : "warn",
+          title: "Bulk send complete",
+          message: `${succeeded} succeeded, ${failed} failed.`,
+        });
+      } else if (parsed.action === "swap") {
+        const res = await fetch(`${SWAP_API_BASE}/swap`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chain: "Arc_Testnet",
+            tokenIn: parsed.tokenIn,
+            tokenOut: parsed.tokenOut,
+            amountIn: parsed.amount,
+            slippageBps: 300,
+            walletAddress: wallet.address,
+          }),
+        });
+        if (!res.ok) throw new Error((await res.json()).error || "Swap failed");
+        const data = await res.json();
+        pushTx({ type: "Swap", tokenIn: parsed.tokenIn, tokenOut: parsed.tokenOut, amountIn: parsed.amount, estimatedOutput: data.estimatedOutput, status: data.status || "submitted" });
+        toast({ tone: "ok", title: "Command complete", message: describeCommand(parsed) });
+      } else if (parsed.action === "mintNft") {
+        const signer = await wallet.provider.getSigner();
+        const nft = new ethers.Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, signer);
+        const tx = await nft.mint();
+        const receipt = await tx.wait();
+        const transferEvent = receipt.logs
+          .map((log) => { try { return nft.interface.parseLog(log); } catch { return null; } })
+          .find((p) => p?.name === "Transfer");
+        const newTokenId = transferEvent?.args?.tokenId?.toString();
+        writeLS(LS_MINTED_KEY, [newTokenId, ...readLS(LS_MINTED_KEY, [])]);
+        toast({ tone: "ok", title: "NFT minted", message: `Token #${newTokenId}` });
+      } else if (parsed.action === "lockNft") {
+        const signer = await wallet.provider.getSigner();
+        const nft = new ethers.Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, signer);
+        const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, signer);
+        const approveTx = await nft.approve(NFT_LOCK_VAULT_ADDRESS, parsed.tokenId);
+        await approveTx.wait();
+        const unlockAt = Math.floor(Date.now() / 1000) + Number(parsed.days) * 86400;
+        const lockTx = await vault.lock(NFT_CONTRACT_ADDRESS, parsed.tokenId, unlockAt);
+        const receipt = await lockTx.wait();
+        const lockedEvent = receipt.logs
+          .map((log) => { try { return vault.interface.parseLog(log); } catch { return null; } })
+          .find((p) => p?.name === "Locked");
+        const newLockId = lockedEvent?.args?.lockId?.toString();
+        writeLS(LS_LOCK_IDS_KEY, [newLockId, ...readLS(LS_LOCK_IDS_KEY, [])]);
+        writeLS(LS_MINTED_KEY, readLS(LS_MINTED_KEY, []).filter((id) => id !== parsed.tokenId));
+        toast({ tone: "ok", title: "NFT locked", message: describeCommand(parsed) });
+      } else if (parsed.action === "withdrawLock") {
+        const signer = await wallet.provider.getSigner();
+        const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, signer);
+        const tx = await vault.withdraw(parsed.lockId);
+        await tx.wait();
+        toast({ tone: "ok", title: "Withdrawn", message: describeCommand(parsed) });
+      }
+      reset();
+    } catch (e) {
+      const msg = e.shortMessage || e.message || "Command failed.";
+      setError(msg);
+      toast({ tone: "bad", title: "Command failed", message: msg });
+    } finally {
+      setRunning(false);
+    }
+  }, [parsed, wallet, onNavigate, reset]);
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="fixed bottom-4 left-4 z-40 w-12 h-12 rounded-full bg-gradient-to-br from-cyan-400 to-purple-600 flex items-center justify-center text-white text-lg shadow-lg hover:scale-105 transition"
+        title="Quick command"
+      >
+        ⚡
+      </button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <GlassCard className="w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-white text-base font-semibold">Quick command</h3>
+              <button onClick={reset} className="text-white/40 hover:text-white/70 text-sm">✕</button>
+            </div>
+            <p className="text-white/40 text-xs mb-3">
+              Type an instruction in plain English — no need to open the matching page.
+            </p>
+
+            <input
+              autoFocus
+              value={text}
+              onChange={(e) => { setText(e.target.value); setParsed(null); setError(null); }}
+              onKeyDown={(e) => e.key === "Enter" && (parsed ? runCommand() : handleParse())}
+              placeholder="send 20 USDC to 0x..."
+              className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm mb-3"
+            />
+
+            {!parsed && (
+              <PrimaryButton onClick={handleParse} className="w-full mb-1" disabled={!text.trim()}>
+                Parse command
+              </PrimaryButton>
+            )}
+
+            {parsed && (
+              <div className="mb-3 px-3 py-3 rounded-lg border border-cyan-500/30 bg-cyan-950/30">
+                <p className="text-white/50 text-xs mb-1">This will:</p>
+                <p className="text-white text-sm font-medium mb-3">{describeCommand(parsed)}</p>
+                <div className="flex gap-2">
+                  <PrimaryButton onClick={runCommand} disabled={running} className="flex-1">
+                    {running ? "Running…" : "Confirm"}
+                  </PrimaryButton>
+                  <button
+                    onClick={() => setParsed(null)}
+                    disabled={running}
+                    className="px-4 py-2 rounded-lg text-white/60 text-sm border border-white/10 hover:bg-white/5"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {error && <p className="text-rose-300 text-xs mb-3">{error}</p>}
+
+            <div className="border-t border-white/5 pt-3">
+              <p className="text-white/40 text-xs mb-2">Try phrases like:</p>
+              <div className="space-y-1">
+                {COMMAND_EXAMPLES.map((ex) => (
+                  <button
+                    key={ex}
+                    onClick={() => { setText(ex.replace("0x1234...5678", "0x")); setParsed(null); setError(null); }}
+                    className="block text-left text-cyan-300/70 hover:text-cyan-300 text-xs font-mono"
+                  >
+                    {ex}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </GlassCard>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1698,6 +2020,7 @@ export default function ArcTestnetDApp() {
   return (
     <div className="min-h-screen bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
       <ToastViewport />
+      <CommandBar wallet={wallet} onNavigate={setPage} />
       {showWelcome && <WelcomeOverlay onDismiss={() => setShowWelcome(false)} />}
       <header className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-4 border-b border-white/5">
         <div className="flex items-center gap-2">
