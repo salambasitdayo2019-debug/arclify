@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { ethers } from "ethers";
 import QRCode from "qrcode";
+import { W3SSdk } from "@circle-fin/w3s-pw-web-sdk";
 import { useInjectedWallets } from "./wallet/eip6963";
 import { getWalletConnectProvider } from "./wallet/walletConnectProvider";
 
@@ -1037,6 +1038,17 @@ function DashboardPage({ wallet }) {
   useEffect(() => {
     let cancelled = false;
     async function loadBalances() {
+      if (wallet.isCircleWallet) {
+        // Circle wallets get their balance from Circle's own API (already
+        // fetched by useCircleWallet), not a direct RPC call — EURC/cirBTC
+        // aren't tracked for this wallet type yet (Phase 2).
+        setBalances({
+          USDC: wallet.circleBalance ?? "0.00",
+          EURC: "—",
+          cirBTC: "—",
+        });
+        return;
+      }
       if (!wallet.provider || !wallet.address) return;
       setLoading(true);
       const eurc = new ethers.Contract(CONTRACTS.EURC, ERC20_ABI, wallet.provider);
@@ -1083,10 +1095,9 @@ function DashboardPage({ wallet }) {
     return () => {
       cancelled = true;
     };
-  }, [wallet.provider, wallet.address, refreshKey]);
+  }, [wallet.provider, wallet.address, wallet.isCircleWallet, wallet.circleBalance, refreshKey]);
 
   const usdcNum = Number(balances.USDC);
-  const eurcNum = Number(balances.EURC);
   const hasBalances = balances.USDC !== "—" && !Number.isNaN(usdcNum);
   // Rough combined total for the hero figure — USDC 1:1, EURC/cirBTC show
   // separately in their own units below since they aren't real USD
@@ -1108,6 +1119,11 @@ function DashboardPage({ wallet }) {
               </p>
             )}
             <p className="text-white/30 text-xs mt-2">Your USDC balance (1 USDC ≈ $1)</p>
+            {wallet.isCircleWallet && (
+              <p className="text-cyan-300/70 text-xs mt-1">
+                Circle Wallet (email login) — Transfer, Swap, and NFT Lock aren't wired up for this wallet type yet.
+              </p>
+            )}
           </div>
           <div className="flex flex-col items-end gap-2">
             <div className="flex items-center gap-2">
@@ -1179,6 +1195,19 @@ function DashboardPage({ wallet }) {
 /*  Page: Transfer (real on-chain ERC-20 transfer via connected wallet) */
 /* ------------------------------------------------------------------ */
 
+function CirclePhase2Notice({ feature }) {
+  return (
+    <GlassCard className="p-6 max-w-lg">
+      <h2 className="text-white text-lg font-semibold mb-2">{feature}</h2>
+      <p className="text-white/50 text-sm">
+        {feature} isn't wired up for Circle Wallets (email login) yet — that's
+        planned for a follow-up build. Sign in with MetaMask or WalletConnect
+        instead to use this feature right now.
+      </p>
+    </GlassCard>
+  );
+}
+
 function TransferPage({ wallet }) {
   const [token, setToken] = useState("USDC");
   const [to, setTo] = useState("");
@@ -1220,6 +1249,8 @@ function TransferPage({ wallet }) {
       setSending(false);
     }
   }, [wallet, token, to, amount]);
+
+  if (wallet.isCircleWallet) return <CirclePhase2Notice feature="Transfer" />;
 
   return (
     <GlassCard className="p-6 max-w-lg">
@@ -1302,6 +1333,8 @@ function BulkTransferPage({ wallet }) {
       message: `${succeeded} succeeded, ${failed} failed.`,
     });
   }, [wallet, rows, token]);
+
+  if (wallet.isCircleWallet) return <CirclePhase2Notice feature="Bulk Transfer" />;
 
   return (
     <GlassCard className="p-6 max-w-2xl">
@@ -1458,6 +1491,8 @@ function SwapPage({ wallet }) {
       setBusy(false);
     }
   }, [wallet.address, tokenIn, tokenOut, amountIn, slippageBps]);
+
+  if (wallet.isCircleWallet) return <CirclePhase2Notice feature="Swap" />;
 
   return (
     <GlassCard className="p-6 max-w-lg">
@@ -1662,6 +1697,8 @@ function NFTLockPage({ wallet }) {
       setBusy(false);
     }
   }, [getContracts]);
+
+  if (wallet.isCircleWallet) return <CirclePhase2Notice feature="NFT Lock" />;
 
   return (
     <GlassCard className="p-6 max-w-lg">
@@ -1981,10 +2018,13 @@ function QrCodeImage({ value }) {
   return <img src={dataUrl} alt="WalletConnect QR code" className="mx-auto rounded-lg" />;
 }
 
-function LoginGate({ wallet, auth }) {
+function LoginGate({ wallet, auth, circleWallet }) {
   const [notRobot, setNotRobot] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
+  const [showEmailForm, setShowEmailForm] = useState(false);
+  const [email, setEmail] = useState("");
   const busy = auth.status === "authenticating";
+  const circleBusy = circleWallet.status === "working" || circleWallet.status === "pinChallenge";
   const injectedConnectors = wallet.connectors.filter((c) => c.kind === "injected");
 
   return (
@@ -2063,6 +2103,49 @@ function LoginGate({ wallet, auth }) {
                       after switching apps to approve.
                     </p>
                   )}
+
+                  <div className="pt-2 mt-2 border-t border-white/5">
+                    {!showEmailForm ? (
+                      <button
+                        onClick={() => setShowEmailForm(true)}
+                        className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition text-left"
+                      >
+                        <div className="w-6 h-6 rounded bg-gradient-to-br from-emerald-400 to-teal-600 flex items-center justify-center text-xs text-white">
+                          ✉
+                        </div>
+                        <span className="text-white text-sm">Sign in with Email</span>
+                      </button>
+                    ) : (
+                      <div className="space-y-2">
+                        <p className="text-white/50 text-xs mb-1">
+                          No wallet needed — you'll set a PIN to secure your account.
+                        </p>
+                        <input
+                          type="email"
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && circleWallet.loginWithEmail(email)}
+                          placeholder="you@example.com"
+                          disabled={circleBusy}
+                          className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+                        />
+                        <PrimaryButton
+                          className="w-full"
+                          disabled={circleBusy || !email.trim()}
+                          onClick={() => circleWallet.loginWithEmail(email)}
+                        >
+                          {circleWallet.status === "pinChallenge"
+                            ? "Set your PIN in the popup…"
+                            : circleBusy
+                            ? "Working…"
+                            : "Continue with Email"}
+                        </PrimaryButton>
+                        {circleWallet.error && (
+                          <p className="text-rose-300 text-xs">{circleWallet.error}</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </>
               )}
             </div>
@@ -2173,31 +2256,58 @@ function ContactFooter() {
 export default function ArcTestnetDApp() {
   const wallet = useWallet();
   const auth = useAuth(wallet);
+  const circleWallet = useCircleWallet();
   const [page, setPage] = useState("Dashboard");
   const [showWelcome, setShowWelcome] = useState(false);
+
+  const isLoggedInViaCircle = circleWallet.status === "ready" && !!circleWallet.address;
+  const isLoggedIn = auth.status === "authenticated" || isLoggedInViaCircle;
+
+  // A single shape every page reads from, regardless of which login path
+  // was used. Circle-wallet users get `provider: null` and `isCircleWallet:
+  // true` — pages that need real signing (Transfer/Swap/NFT Lock) check
+  // that flag to show a "coming soon" state instead of attempting an
+  // ethers.js call that would fail (Phase 2 territory, not built yet).
+  const effectiveWallet = isLoggedInViaCircle
+    ? {
+        address: circleWallet.address,
+        provider: null,
+        chainId: ARC_TESTNET.chainId,
+        isOnArc: true,
+        connecting: false,
+        error: circleWallet.error,
+        connectors: [],
+        connect: () => {},
+        disconnect: circleWallet.logout,
+        qrUri: null,
+        isCircleWallet: true,
+        circleBalance: circleWallet.balance,
+        refreshCircleBalance: circleWallet.refreshBalance,
+      }
+    : { ...wallet, isCircleWallet: false };
 
   // Show the welcome card exactly once, right after a successful sign-in —
   // never again after that, even across future logins on this browser.
   useEffect(() => {
-    if (auth.status !== "authenticated") return;
+    if (!isLoggedIn) return;
     if (localStorage.getItem(WELCOME_SEEN_KEY)) return;
     localStorage.setItem(WELCOME_SEEN_KEY, "1");
     setShowWelcome(true);
-  }, [auth.status]);
+  }, [isLoggedIn]);
 
   const pageEl = useMemo(() => {
     switch (page) {
-      case "Dashboard": return <DashboardPage wallet={wallet} />;
-      case "Transfer": return <TransferPage wallet={wallet} />;
-      case "Bulk Transfer": return <BulkTransferPage wallet={wallet} />;
-      case "Swap": return <SwapPage wallet={wallet} />;
-      case "NFT Lock": return <NFTLockPage wallet={wallet} />;
-      case "History": return <HistoryPage wallet={wallet} />;
-      case "Leaderboard": return <LeaderboardPage wallet={wallet} />;
-      case "Wallet Profile": return <WalletProfilePage wallet={wallet} />;
+      case "Dashboard": return <DashboardPage wallet={effectiveWallet} />;
+      case "Transfer": return <TransferPage wallet={effectiveWallet} />;
+      case "Bulk Transfer": return <BulkTransferPage wallet={effectiveWallet} />;
+      case "Swap": return <SwapPage wallet={effectiveWallet} />;
+      case "NFT Lock": return <NFTLockPage wallet={effectiveWallet} />;
+      case "History": return <HistoryPage wallet={effectiveWallet} />;
+      case "Leaderboard": return <LeaderboardPage wallet={effectiveWallet} />;
+      case "Wallet Profile": return <WalletProfilePage wallet={effectiveWallet} />;
       default: return null;
     }
-  }, [page, wallet]);
+  }, [page, effectiveWallet]);
 
   if (auth.status === "checking") {
     return (
@@ -2207,14 +2317,14 @@ export default function ArcTestnetDApp() {
     );
   }
 
-  if (auth.status !== "authenticated") {
-    return <LoginGate wallet={wallet} auth={auth} />;
+  if (!isLoggedIn) {
+    return <LoginGate wallet={wallet} auth={auth} circleWallet={circleWallet} />;
   }
 
   return (
     <div className="min-h-screen bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
       <ToastViewport />
-      <CommandBar wallet={wallet} onNavigate={setPage} />
+      <CommandBar wallet={effectiveWallet} onNavigate={setPage} />
       {showWelcome && <WelcomeOverlay onDismiss={() => setShowWelcome(false)} />}
       <header className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-4 border-b border-white/5">
         <div className="flex items-center gap-2">
@@ -2222,27 +2332,31 @@ export default function ArcTestnetDApp() {
           <span className="text-white font-semibold tracking-tight">Arclify</span>
         </div>
         <div className="flex items-center gap-2">
-          <Pill tone={wallet.isOnArc ? "ok" : "warn"}>
-            {wallet.address
-              ? `${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}`
+          {isLoggedInViaCircle && <Pill tone="neutral">Email login</Pill>}
+          <Pill tone={effectiveWallet.isOnArc ? "ok" : "warn"}>
+            {effectiveWallet.address
+              ? `${effectiveWallet.address.slice(0, 6)}…${effectiveWallet.address.slice(-4)}`
               : `${auth.sessionAddress?.slice(0, 6)}…${auth.sessionAddress?.slice(-4)}`}
           </Pill>
-          <button onClick={auth.logout} className="text-white/40 text-xs hover:text-white/70">
+          <button
+            onClick={() => { auth.logout(); circleWallet.logout(); }}
+            className="text-white/40 text-xs hover:text-white/70"
+          >
             Sign out
           </button>
         </div>
       </header>
 
-      {!wallet.address && auth.sessionAddress && (
+      {!isLoggedInViaCircle && !wallet.address && auth.sessionAddress && (
         <div className="px-4 sm:px-6 pt-3">
           <p className="text-amber-300 text-xs">
             Signed in as {auth.sessionAddress.slice(0, 6)}…{auth.sessionAddress.slice(-4)}, but your wallet isn't connected in this tab — reconnect it to send transactions.
           </p>
         </div>
       )}
-      {wallet.error && (
+      {effectiveWallet.error && (
         <div className="px-4 sm:px-6 pt-3">
-          <p className="text-rose-300 text-xs">{wallet.error}</p>
+          <p className="text-rose-300 text-xs">{effectiveWallet.error}</p>
         </div>
       )}
 
