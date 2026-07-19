@@ -555,6 +555,7 @@ function useCircleWallet() {
           sdk.setAuthentication({ userToken, encryptionKey });
           sdk.execute(initData.challengeId, async (err) => {
             if (err) {
+              console.error("Circle PIN challenge failed:", err);
               setError(err?.message || "PIN setup was cancelled or failed.");
               setStatus("idle");
               return;
@@ -578,7 +579,8 @@ function useCircleWallet() {
           throw new Error(initData.error || initData.message || "Could not initialize wallet.");
         }
       } catch (e) {
-        setError(e.message || "Sign-in failed. Please try again.");
+        console.error("Circle Wallets sign-in failed:", e);
+        setError(e?.message || "Sign-in failed. Please try again.");
         setStatus("idle");
       }
     },
