@@ -2031,10 +2031,11 @@ function LoginGate({ wallet, auth, circleWallet }) {
     <div className="min-h-screen flex flex-col bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
       <div className="flex-1 flex flex-col items-center justify-center p-6 gap-6">
         <GlassCard className="w-full max-w-md p-8">
-          <div className="flex items-center justify-center gap-2 mb-2">
+          <div className="flex items-center justify-center gap-2 mb-1">
             <img src="/favicon.svg" alt="Arclify" className="w-9 h-9" />
             <span className="text-white text-lg font-semibold tracking-tight">Arclify</span>
           </div>
+          <p className="text-cyan-300/60 text-xs text-center mb-3">Our app is built on Arc</p>
           <p className="text-white/50 text-sm text-center mb-6">
             Sign in with your wallet to open your Arc Testnet dashboard.
           </p>
@@ -2329,7 +2330,10 @@ export default function ArcTestnetDApp() {
       <header className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-4 border-b border-white/5">
         <div className="flex items-center gap-2">
           <img src="/favicon.svg" alt="Arclify" className="w-7 h-7" />
-          <span className="text-white font-semibold tracking-tight">Arclify</span>
+          <div className="leading-tight">
+            <span className="block text-white font-semibold tracking-tight">Arclify</span>
+            <span className="block text-cyan-300/50 text-[10px]">Built on Arc</span>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {isLoggedInViaCircle && <Pill tone="neutral">Email login</Pill>}
