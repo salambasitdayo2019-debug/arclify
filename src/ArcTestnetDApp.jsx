@@ -549,6 +549,9 @@ function useCircleWallet() {
           // its own hosted popup before the wallet is actually created.
           setStatus("pinChallenge");
           const sdk = getSdk();
+          // Required by Circle's own integration guidance: without calling
+          // getDeviceId() first, sdk.execute() silently does nothing.
+          await sdk.getDeviceId();
           sdk.setAuthentication({ userToken, encryptionKey });
           sdk.execute(initData.challengeId, async (err) => {
             if (err) {
