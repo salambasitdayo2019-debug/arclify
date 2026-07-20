@@ -150,3 +150,46 @@ router.get("/circle/balance", async (req, res) => {
 });
 
 export default router;
+
+/**
+ * POST /api/circle/transfer-challenge
+ *
+ * Phase 2a: creates a Circle transaction challenge for sending native USDC
+ * from a Circle-controlled wallet. Returns a challengeId that the frontend
+ * then executes via the Web SDK (sdk.execute), which shows the user their
+ * PIN prompt to actually authorize the send.
+ *
+ * Scoped to native USDC only for now — EURC/cirBTC are ERC-20 tokens and
+ * need a slightly different request shape (tokenAddress + blockchain)
+ * that hasn't been verified against Arc Testnet yet.
+ */
+router.post("/circle/transfer-challenge", async (req, res) => {
+  if (!requireApiKey(res)) return;
+  const { userToken, walletId, destinationAddress, amount } = req.body || {};
+  if (!userToken || !walletId || !destinationAddress || !amount) {
+    return res.status(400).json({ error: "Missing required fields." });
+  }
+  try {
+    const response = await fetch(`${CIRCLE_BASE_URL}/v1/w3s/user/transactions/transfer`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+        "X-User-Token": userToken,
+      },
+      body: JSON.stringify({
+        idempotencyKey: crypto.randomUUID(),
+        walletId,
+        destinationAddress,
+        amounts: [String(amount)],
+        feeLevel: "MEDIUM",
+        // tokenId/tokenAddress intentionally omitted — native USDC transfer
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json(data);
+    res.json(data.data); // { challengeId }
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Failed to create transfer challenge." });
+  }
+});
