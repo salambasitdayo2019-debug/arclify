@@ -633,7 +633,48 @@ function useCircleWallet() {
     }
   }, [loadWalletAndBalance]);
 
-  return { status, error, address, walletId, balance, loginWithEmail, logout, refreshBalance };
+  // Phase 2a: send native USDC from a Circle-controlled wallet. Creates a
+  // transfer challenge server-side, then has the user approve it with
+  // their PIN via the Web SDK — a genuinely different flow from ethers.js
+  // signing, since Circle (not the browser) holds the signing keyshare.
+  const sendTransfer = useCallback(async ({ to, amount }) => {
+    if (!sessionRef.current || !walletId) {
+      throw new Error("Not signed in with a Circle wallet.");
+    }
+    const { userToken, encryptionKey } = sessionRef.current;
+
+    const res = await fetch(`${API_BASE}/circle/transfer-challenge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userToken, walletId, destinationAddress: to, amount }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || body.message || "Could not start transfer.");
+    }
+    const { challengeId } = await res.json();
+
+    const sdk = getSdk();
+    if (!deviceIdRef.current) {
+      deviceIdRef.current = await sdk.getDeviceId();
+    }
+    sdk.setAuthentication({ userToken, encryptionKey });
+
+    await new Promise((resolve, reject) => {
+      sdk.execute(challengeId, (err) => {
+        if (err) {
+          reject(new Error(err?.message || "Transfer was cancelled or failed."));
+          return;
+        }
+        resolve();
+      });
+    });
+
+    // Give Circle a moment to settle, then refresh balance.
+    setTimeout(() => refreshBalance(), 2500);
+  }, [walletId, getSdk, refreshBalance]);
+
+  return { status, error, address, walletId, balance, loginWithEmail, logout, refreshBalance, sendTransfer };
 }
 
 /* ------------------------------------------------------------------ */
@@ -681,6 +722,44 @@ const Pill = ({ tone = "neutral", children }) => {
 const Skeleton = ({ className = "" }) => (
   <div className={`animate-pulse rounded-md bg-white/10 ${className}`} />
 );
+
+function CopyButton({ value, className = "" }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = useCallback(async (e) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      // Fallback for browsers/contexts where clipboard API is blocked
+      const el = document.createElement("textarea");
+      el.value = value;
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }, [value]);
+
+  if (!value) return null;
+  return (
+    <button
+      onClick={handleCopy}
+      title="Copy to clipboard"
+      className={`inline-flex items-center gap-1 text-white/40 hover:text-white/80 transition ${className}`}
+    >
+      {copied ? (
+        <span className="text-emerald-300 text-xs">Copied!</span>
+      ) : (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <rect x="9" y="9" width="13" height="13" rx="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
+    </button>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /*  Toast notifications — a tiny global pub/sub, no context needed      */
@@ -1157,7 +1236,7 @@ function DashboardPage({ wallet }) {
             <p className="text-white/30 text-xs mt-2">Your USDC balance (1 USDC ≈ $1)</p>
             {wallet.isCircleWallet && (
               <p className="text-cyan-300/70 text-xs mt-1">
-                Circle Wallet (email login) — Transfer, Swap, and NFT Lock aren't wired up for this wallet type yet.
+                Circle Wallet (email login) — USDC transfers work. Swap, NFT Lock, and EURC/cirBTC transfers aren't wired up for this wallet type yet.
               </p>
             )}
           </div>
@@ -1174,9 +1253,12 @@ function DashboardPage({ wallet }) {
                 {loading ? "Refreshing…" : "Refresh"}
               </button>
             </div>
-            <p className="text-white/40 font-mono text-xs break-all text-right">
-              {wallet.address ?? "Not connected"}
-            </p>
+            <div className="flex items-center gap-2 justify-end">
+              <p className="text-white/40 font-mono text-xs break-all">
+                {wallet.address ?? "Not connected"}
+              </p>
+              <CopyButton value={wallet.address} />
+            </div>
           </div>
         </div>
       </GlassCard>
@@ -1251,12 +1333,40 @@ function TransferPage({ wallet }) {
   const [sending, setSending] = useState(false);
 
   const handleSend = useCallback(async () => {
-    if (!wallet.provider || !wallet.address) {
+    if (!wallet.address) {
       toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     if (!ethers.isAddress(to) || !amount) {
       toast({ tone: "bad", title: "Invalid input", message: "Enter a valid address and amount." });
+      return;
+    }
+
+    if (wallet.isCircleWallet) {
+      if (token !== NATIVE_TOKEN_SYMBOL) {
+        toast({
+          tone: "bad",
+          title: "Not supported yet",
+          message: "Circle Wallets can only send USDC right now — EURC and cirBTC are coming in a follow-up build.",
+        });
+        return;
+      }
+      setSending(true);
+      try {
+        await wallet.circleSendTransfer({ to, amount });
+        toast({ tone: "ok", title: "Transfer confirmed", message: `${amount} USDC sent successfully.` });
+        setTo("");
+        setAmount("");
+      } catch (e) {
+        toast({ tone: "bad", title: "Transfer failed", message: e.message });
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+
+    if (!wallet.provider) {
+      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     setSending(true);
@@ -1286,11 +1396,14 @@ function TransferPage({ wallet }) {
     }
   }, [wallet, token, to, amount]);
 
-  if (wallet.isCircleWallet) return <CirclePhase2Notice feature="Transfer" />;
-
   return (
     <GlassCard className="p-6 max-w-lg">
       <h2 className="text-white text-lg font-semibold mb-4">Transfer</h2>
+      {wallet.isCircleWallet && (
+        <p className="text-cyan-300/70 text-xs mb-3">
+          Circle Wallet: only USDC transfers are supported right now.
+        </p>
+      )}
       <label className="text-white/50 text-xs">Token</label>
       <select
         value={token}
@@ -2320,6 +2433,7 @@ export default function ArcTestnetDApp() {
         isCircleWallet: true,
         circleBalance: circleWallet.balance,
         refreshCircleBalance: circleWallet.refreshBalance,
+        circleSendTransfer: circleWallet.sendTransfer,
       }
     : { ...wallet, isCircleWallet: false };
 
@@ -2378,6 +2492,7 @@ export default function ArcTestnetDApp() {
               ? `${effectiveWallet.address.slice(0, 6)}…${effectiveWallet.address.slice(-4)}`
               : `${auth.sessionAddress?.slice(0, 6)}…${auth.sessionAddress?.slice(-4)}`}
           </Pill>
+          {effectiveWallet.address && <CopyButton value={effectiveWallet.address} />}
           <button
             onClick={() => { auth.logout(); circleWallet.logout(); }}
             className="text-white/40 text-xs hover:text-white/70"
