@@ -459,7 +459,36 @@ function useCircleWallet() {
   const [walletId, setWalletId] = useState(null);
   const [balance, setBalance] = useState(null);
   const sdkRef = useRef(null);
+  const deviceIdRef = useRef(null);
   const sessionRef = useRef(null); // { userId, userToken, encryptionKey }
+
+  // Initialize the SDK and pre-fetch its deviceId as soon as this hook
+  // mounts, not lazily on click. Circle's own reference implementation
+  // does this on page load via a "sdkReady" flag — calling getDeviceId()
+  // immediately after construction (same tick) is what was causing
+  // "Failed to receive deviceId", since the SDK's internal channel needs
+  // a moment to finish setting up first.
+  useEffect(() => {
+    if (!CIRCLE_APP_ID) return;
+    let cancelled = false;
+    try {
+      sdkRef.current = new W3SSdk({ appSettings: { appId: CIRCLE_APP_ID } });
+    } catch (e) {
+      console.error("Failed to initialize Circle Web SDK:", e);
+      return;
+    }
+    sdkRef.current
+      .getDeviceId()
+      .then((id) => {
+        if (!cancelled) deviceIdRef.current = id;
+      })
+      .catch((e) => {
+        console.error("Failed to pre-fetch Circle deviceId:", e);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const getSdk = useCallback(() => {
     if (!sdkRef.current) {
@@ -549,9 +578,11 @@ function useCircleWallet() {
           // its own hosted popup before the wallet is actually created.
           setStatus("pinChallenge");
           const sdk = getSdk();
-          // Required by Circle's own integration guidance: without calling
-          // getDeviceId() first, sdk.execute() silently does nothing.
-          await sdk.getDeviceId();
+          // Use the deviceId pre-fetched on mount if we have it; otherwise
+          // this is a fresh retry, which by now has had time to succeed.
+          if (!deviceIdRef.current) {
+            deviceIdRef.current = await sdk.getDeviceId();
+          }
           sdk.setAuthentication({ userToken, encryptionKey });
           sdk.execute(initData.challengeId, async (err) => {
             if (err) {
