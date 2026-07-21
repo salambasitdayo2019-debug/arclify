@@ -1,13 +1,14 @@
 /**
  * server/index.js
  *
- * Express entrypoint for Arclify's backend. Currently just hosts the
- * Circle App Kit Swap endpoints (POST /api/estimate-swap, POST /api/swap),
- * since Swap is the only capability that must run server-side.
+ * Express entrypoint for Arclify's backend. Hosts Circle App Kit Swap
+ * (POST /api/estimate-swap, POST /api/swap), wallet sign-in, Circle
+ * Wallets (email/PIN), and a thin CCTP attestation proxy for Bridge.
  *
- * Send, Bridge, and Unified Balance stay client-side in the React app
- * using the connected MetaMask wallet directly — no backend involvement
- * needed for those.
+ * Send stays entirely client-side using the connected wallet directly —
+ * no backend involvement needed there. Bridge's actual transactions are
+ * also signed client-side; the backend only proxies Circle's Iris
+ * attestation polling (see bridgeRoute.js for why).
  */
 
 import express from "express";
@@ -16,6 +17,7 @@ import dotenv from "dotenv";
 import swapRoute from "./swapRoute.js";
 import authRoute from "./authRoute.js";
 import circleWalletsRoute from "./circleWalletsRoute.js";
+import bridgeRoute from "./bridgeRoute.js";
 
 dotenv.config();
 
@@ -49,6 +51,7 @@ app.get("/api/health", (_req, res) => {
 app.use("/api", swapRoute);
 app.use("/api", authRoute);
 app.use("/api", circleWalletsRoute);
+app.use("/api", bridgeRoute);
 
 // Fallback error handler so a thrown error doesn't crash the process
 app.use((err, _req, res, _next) => {
