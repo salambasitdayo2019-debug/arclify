@@ -77,6 +77,12 @@ async function withRpcRetry(fn, { retries = 5, baseDelayMs = 900 } = {}) {
   throw lastErr;
 }
 
+// Circle-wallet users have no ethers.js provider (Circle holds the signing
+// keyshare, not the browser) — this plain read-only RPC provider lets us
+// still read on-chain state (lock status, receipts/logs after a Circle
+// contract-execution transaction) the same way for both wallet types.
+const readOnlyProvider = new ethers.JsonRpcProvider(ARC_TESTNET.rpcUrls[0]);
+
 const API_BASE = import.meta?.env?.VITE_SWAP_API_BASE || "/api";
 const SESSION_STORAGE_KEY = "arclify_session";
 const CIRCLE_SESSION_STORAGE_KEY = "arclify_circle_session";
@@ -458,6 +464,7 @@ function useCircleWallet() {
   const [address, setAddress] = useState(null);
   const [walletId, setWalletId] = useState(null);
   const [balance, setBalance] = useState(null);
+  const [balances, setBalances] = useState({ USDC: "0", EURC: "0", cirBTC: "0" });
   const sdkRef = useRef(null);
   const deviceIdRef = useRef(null);
   const sessionRef = useRef(null); // { userId, userToken, encryptionKey }
@@ -509,8 +516,19 @@ function useCircleWallet() {
     const balRes = await fetch(`${API_BASE}/circle/balance?userToken=${encodeURIComponent(userToken)}&walletId=${primary.id}`);
     if (balRes.ok) {
       const { tokenBalances } = await balRes.json();
-      const usdc = tokenBalances?.find((t) => (t.token?.symbol || "").startsWith("USDC"));
-      setBalance(usdc?.amount ?? "0");
+      // Circle's wallet-balance endpoint already returns every token this
+      // wallet holds, not just USDC — we were just throwing the rest away.
+      // Match by symbol so EURC/cirBTC show up too, same source of truth
+      // (Circle's own balance API) as before.
+      const findAmt = (matcher) =>
+        tokenBalances?.find((t) => matcher((t.token?.symbol || "").toUpperCase()))?.amount ?? "0";
+      const usdcAmt = findAmt((s) => s.startsWith("USDC"));
+      setBalance(usdcAmt);
+      setBalances({
+        USDC: usdcAmt,
+        EURC: findAmt((s) => s.startsWith("EURC")),
+        cirBTC: findAmt((s) => s.includes("BTC")),
+      });
     }
     return primary;
   }, []);
@@ -637,7 +655,11 @@ function useCircleWallet() {
   // transfer challenge server-side, then has the user approve it with
   // their PIN via the Web SDK — a genuinely different flow from ethers.js
   // signing, since Circle (not the browser) holds the signing keyshare.
-  const sendTransfer = useCallback(async ({ to, amount }) => {
+  // token/tokenAddress: pass tokenAddress for EURC/cirBTC (real ERC-20s on
+  // Arc Testnet); omit it for native USDC — the backend only attaches it
+  // to the Circle request when present, matching Circle's native-vs-token
+  // transfer request shapes.
+  const sendTransfer = useCallback(async ({ to, amount, tokenAddress }) => {
     if (!sessionRef.current || !walletId) {
       throw new Error("Not signed in with a Circle wallet.");
     }
@@ -646,7 +668,7 @@ function useCircleWallet() {
     const res = await fetch(`${API_BASE}/circle/transfer-challenge`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userToken, walletId, destinationAddress: to, amount }),
+      body: JSON.stringify({ userToken, walletId, destinationAddress: to, amount, tokenAddress }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -674,7 +696,79 @@ function useCircleWallet() {
     setTimeout(() => refreshBalance(), 2500);
   }, [walletId, getSdk, refreshBalance]);
 
-  return { status, error, address, walletId, balance, loginWithEmail, logout, refreshBalance, sendTransfer };
+  // Phase 2c: generic contract-execution challenge — used by NFT Lock for
+  // mint/approve/lock/withdraw, since those are arbitrary contract calls
+  // rather than token sends. Resolves to the txHash of the confirmed
+  // transaction (found via Circle's transaction list, matched by
+  // contractAddress) so callers can read the on-chain receipt themselves
+  // to pull out event data (minted tokenId, new lockId, etc.) the same
+  // way the app already does for MetaMask/WalletConnect users.
+  const executeContract = useCallback(async ({ contractAddress, abiFunctionSignature, abiParameters }) => {
+    if (!sessionRef.current || !walletId) {
+      throw new Error("Not signed in with a Circle wallet.");
+    }
+    const { userToken, encryptionKey } = sessionRef.current;
+
+    const res = await fetch(`${API_BASE}/circle/contract-execution-challenge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userToken, walletId, contractAddress, abiFunctionSignature, abiParameters }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || body.message || "Could not start transaction.");
+    }
+    const { challengeId } = await res.json();
+
+    const sdk = getSdk();
+    if (!deviceIdRef.current) {
+      deviceIdRef.current = await sdk.getDeviceId();
+    }
+    sdk.setAuthentication({ userToken, encryptionKey });
+
+    await new Promise((resolve, reject) => {
+      sdk.execute(challengeId, (err) => {
+        if (err) {
+          reject(new Error(err?.message || "Transaction was cancelled or failed."));
+          return;
+        }
+        resolve();
+      });
+    });
+
+    // The SDK callback doesn't hand back a txHash, so poll Circle's own
+    // transaction list for the most recent transaction against this
+    // contract and wait for it to reach a state that has a txHash.
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      try {
+        const listRes = await fetch(`${API_BASE}/circle/transactions?userToken=${encodeURIComponent(userToken)}`);
+        if (!listRes.ok) continue;
+        const { transactions } = await listRes.json();
+        const match = transactions?.find(
+          (t) => (t.contractAddress || "").toLowerCase() === contractAddress.toLowerCase() && t.txHash
+        );
+        if (match) return match.txHash;
+      } catch {
+        // keep polling
+      }
+    }
+    throw new Error("Transaction confirmed but couldn't locate its hash yet — check History in a moment.");
+  }, [walletId, getSdk]);
+
+  return {
+    status,
+    error,
+    address,
+    walletId,
+    balance,
+    balances,
+    loginWithEmail,
+    logout,
+    refreshBalance,
+    sendTransfer,
+    executeContract,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1154,13 +1248,13 @@ function DashboardPage({ wallet }) {
     let cancelled = false;
     async function loadBalances() {
       if (wallet.isCircleWallet) {
-        // Circle wallets get their balance from Circle's own API (already
-        // fetched by useCircleWallet), not a direct RPC call — EURC/cirBTC
-        // aren't tracked for this wallet type yet (Phase 2).
+        // Circle wallets get every token's balance from Circle's own
+        // balance API (already fetched by useCircleWallet), not a direct
+        // RPC call.
         setBalances({
-          USDC: wallet.circleBalance ?? "0.00",
-          EURC: "—",
-          cirBTC: "—",
+          USDC: wallet.circleBalances?.USDC ?? wallet.circleBalance ?? "0.00",
+          EURC: wallet.circleBalances?.EURC ?? "0.00",
+          cirBTC: wallet.circleBalances?.cirBTC ?? "0.00",
         });
         return;
       }
@@ -1210,7 +1304,7 @@ function DashboardPage({ wallet }) {
     return () => {
       cancelled = true;
     };
-  }, [wallet.provider, wallet.address, wallet.isCircleWallet, wallet.circleBalance, refreshKey]);
+  }, [wallet.provider, wallet.address, wallet.isCircleWallet, wallet.circleBalance, wallet.circleBalances, refreshKey]);
 
   const usdcNum = Number(balances.USDC);
   const hasBalances = balances.USDC !== "—" && !Number.isNaN(usdcNum);
@@ -1236,7 +1330,7 @@ function DashboardPage({ wallet }) {
             <p className="text-white/30 text-xs mt-2">Your USDC balance (1 USDC ≈ $1)</p>
             {wallet.isCircleWallet && (
               <p className="text-cyan-300/70 text-xs mt-1">
-                Circle Wallet (email login) — USDC transfers work. Swap, NFT Lock, and EURC/cirBTC transfers aren't wired up for this wallet type yet.
+                Circle Wallet (email login) — Transfer, Swap, and NFT Lock all work here now.
               </p>
             )}
           </div>
@@ -1343,18 +1437,13 @@ function TransferPage({ wallet }) {
     }
 
     if (wallet.isCircleWallet) {
-      if (token !== NATIVE_TOKEN_SYMBOL) {
-        toast({
-          tone: "bad",
-          title: "Not supported yet",
-          message: "Circle Wallets can only send USDC right now — EURC and cirBTC are coming in a follow-up build.",
-        });
-        return;
-      }
       setSending(true);
       try {
-        await wallet.circleSendTransfer({ to, amount });
-        toast({ tone: "ok", title: "Transfer confirmed", message: `${amount} USDC sent successfully.` });
+        // Native USDC omits tokenAddress entirely; EURC/cirBTC are real
+        // ERC-20 contracts so we pass their address through.
+        const tokenAddress = token === NATIVE_TOKEN_SYMBOL ? undefined : CONTRACTS[token];
+        await wallet.circleSendTransfer({ to, amount, tokenAddress });
+        toast({ tone: "ok", title: "Transfer confirmed", message: `${amount} ${token} sent successfully.` });
         setTo("");
         setAmount("");
       } catch (e) {
@@ -1401,7 +1490,7 @@ function TransferPage({ wallet }) {
       <h2 className="text-white text-lg font-semibold mb-4">Transfer</h2>
       {wallet.isCircleWallet && (
         <p className="text-cyan-300/70 text-xs mb-3">
-          Circle Wallet: only USDC transfers are supported right now.
+          Circle Wallet: sending USDC, EURC, or cirBTC — you'll confirm with your PIN.
         </p>
       )}
       <label className="text-white/50 text-xs">Token</label>
@@ -1641,8 +1730,6 @@ function SwapPage({ wallet }) {
     }
   }, [wallet.address, tokenIn, tokenOut, amountIn, slippageBps]);
 
-  if (wallet.isCircleWallet) return <CirclePhase2Notice feature="Swap" />;
-
   return (
     <GlassCard className="p-6 max-w-lg">
       <h2 className="text-white text-lg font-semibold mb-1">Swap</h2>
@@ -1751,11 +1838,17 @@ function NFTLockPage({ wallet }) {
     return { nft, vault };
   }, [wallet.provider]);
 
-  // Pull live status for every lock this browser knows about
+  const nftInterface = useMemo(() => new ethers.Interface(NFT_ABI), []);
+  const vaultInterface = useMemo(() => new ethers.Interface(NFT_LOCK_ABI), []);
+
+  // Pull live status for every lock this browser knows about. Circle
+  // wallets have no wallet.provider, so this falls back to the plain
+  // read-only RPC provider — reading on-chain state doesn't need signing.
   useEffect(() => {
     async function loadLockDetails() {
-      if (!wallet.provider || lockIds.length === 0) return;
-      const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, wallet.provider);
+      if (lockIds.length === 0) return;
+      const provider = wallet.provider || readOnlyProvider;
+      const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, provider);
       const entries = await Promise.all(
         lockIds.map(async (id) => {
           try {
@@ -1777,17 +1870,30 @@ function NFTLockPage({ wallet }) {
   }, [wallet.provider, lockIds]);
 
   const mintNft = useCallback(async () => {
-    if (!wallet.provider) {
+    if (!wallet.address) {
       toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     setBusy(true);
     try {
-      const { nft } = await getContracts();
-      const tx = await nft.mint();
-      const receipt = await tx.wait();
+      let receipt;
+      if (wallet.isCircleWallet) {
+        // Circle holds the signing keyshare — this creates a transaction
+        // challenge, the user approves with their PIN, and we get back
+        // the confirmed txHash to read the receipt from ourselves.
+        const txHash = await wallet.circleExecuteContract({
+          contractAddress: NFT_CONTRACT_ADDRESS,
+          abiFunctionSignature: "mint()",
+          abiParameters: [],
+        });
+        receipt = await readOnlyProvider.getTransactionReceipt(txHash);
+      } else {
+        const { nft } = await getContracts();
+        const tx = await nft.mint();
+        receipt = await tx.wait();
+      }
       const transferEvent = receipt.logs
-        .map((log) => { try { return nft.interface.parseLog(log); } catch { return null; } })
+        .map((log) => { try { return nftInterface.parseLog(log); } catch { return null; } })
         .find((parsed) => parsed?.name === "Transfer");
       const newTokenId = transferEvent?.args?.tokenId?.toString();
       const next = [newTokenId, ...mintedIds];
@@ -1799,20 +1905,37 @@ function NFTLockPage({ wallet }) {
     } finally {
       setBusy(false);
     }
-  }, [wallet.provider, mintedIds, getContracts]);
+  }, [wallet, mintedIds, getContracts, nftInterface]);
 
   const lockNft = useCallback(async (tokenId) => {
     setBusy(true);
     try {
-      const { nft, vault } = await getContracts();
-      const approveTx = await nft.approve(NFT_LOCK_VAULT_ADDRESS, tokenId);
-      await approveTx.wait();
-
       const unlockAt = Math.floor(Date.now() / 1000) + Number(duration) * 86400;
-      const lockTx = await vault.lock(NFT_CONTRACT_ADDRESS, tokenId, unlockAt);
-      const receipt = await lockTx.wait();
+      let receipt;
+      if (wallet.isCircleWallet) {
+        // approve() then lock() — two sequential PIN-approved transactions,
+        // same two-step flow as the MetaMask path just done via Circle's
+        // contract-execution challenges instead of ethers signing.
+        await wallet.circleExecuteContract({
+          contractAddress: NFT_CONTRACT_ADDRESS,
+          abiFunctionSignature: "approve(address,uint256)",
+          abiParameters: [NFT_LOCK_VAULT_ADDRESS, String(tokenId)],
+        });
+        const lockTxHash = await wallet.circleExecuteContract({
+          contractAddress: NFT_LOCK_VAULT_ADDRESS,
+          abiFunctionSignature: "lock(address,uint256,uint256)",
+          abiParameters: [NFT_CONTRACT_ADDRESS, String(tokenId), String(unlockAt)],
+        });
+        receipt = await readOnlyProvider.getTransactionReceipt(lockTxHash);
+      } else {
+        const { nft, vault } = await getContracts();
+        const approveTx = await nft.approve(NFT_LOCK_VAULT_ADDRESS, tokenId);
+        await approveTx.wait();
+        const lockTx = await vault.lock(NFT_CONTRACT_ADDRESS, tokenId, unlockAt);
+        receipt = await lockTx.wait();
+      }
       const lockedEvent = receipt.logs
-        .map((log) => { try { return vault.interface.parseLog(log); } catch { return null; } })
+        .map((log) => { try { return vaultInterface.parseLog(log); } catch { return null; } })
         .find((parsed) => parsed?.name === "Locked");
       const newLockId = lockedEvent?.args?.lockId?.toString();
 
@@ -1830,14 +1953,22 @@ function NFTLockPage({ wallet }) {
     } finally {
       setBusy(false);
     }
-  }, [getContracts, duration, lockIds, mintedIds]);
+  }, [wallet, getContracts, duration, lockIds, mintedIds, vaultInterface]);
 
   const withdrawLock = useCallback(async (lockId) => {
     setBusy(true);
     try {
-      const { vault } = await getContracts();
-      const tx = await vault.withdraw(lockId);
-      await tx.wait();
+      if (wallet.isCircleWallet) {
+        await wallet.circleExecuteContract({
+          contractAddress: NFT_LOCK_VAULT_ADDRESS,
+          abiFunctionSignature: "withdraw(uint256)",
+          abiParameters: [String(lockId)],
+        });
+      } else {
+        const { vault } = await getContracts();
+        const tx = await vault.withdraw(lockId);
+        await tx.wait();
+      }
       toast({ tone: "ok", title: "Withdrawn", message: `Lock #${lockId} withdrawn.` });
       setLockDetails((prev) => ({ ...prev, [lockId]: { ...prev[lockId], withdrawn: true } }));
     } catch (e) {
@@ -1845,9 +1976,7 @@ function NFTLockPage({ wallet }) {
     } finally {
       setBusy(false);
     }
-  }, [getContracts]);
-
-  if (wallet.isCircleWallet) return <CirclePhase2Notice feature="NFT Lock" />;
+  }, [wallet, getContracts]);
 
   return (
     <GlassCard className="p-6 max-w-lg">
@@ -1855,6 +1984,11 @@ function NFTLockPage({ wallet }) {
       <p className="text-white/40 text-xs mb-4">
         Real on-chain lock via a custom vault contract on Arc Testnet. Mint a free test NFT, then lock it for a chosen duration.
       </p>
+      {wallet.isCircleWallet && (
+        <p className="text-cyan-300/70 text-xs mb-3">
+          Circle Wallet: mint, lock, and withdraw each need a PIN confirmation — locking takes two (approve, then lock).
+        </p>
+      )}
 
       <PrimaryButton disabled={busy} onClick={mintNft}>
         {busy ? "Working…" : "Mint test NFT"}
@@ -2432,8 +2566,10 @@ export default function ArcTestnetDApp() {
         qrUri: null,
         isCircleWallet: true,
         circleBalance: circleWallet.balance,
+        circleBalances: circleWallet.balances,
         refreshCircleBalance: circleWallet.refreshBalance,
         circleSendTransfer: circleWallet.sendTransfer,
+        circleExecuteContract: circleWallet.executeContract,
       }
     : { ...wallet, isCircleWallet: false };
 
