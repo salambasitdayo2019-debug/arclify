@@ -149,28 +149,79 @@ router.get("/circle/balance", async (req, res) => {
   }
 });
 
-export default router;
-
 /**
  * POST /api/circle/transfer-challenge
  *
- * Phase 2a: creates a Circle transaction challenge for sending native USDC
+ * Phase 2a/2b: creates a Circle transaction challenge for sending a token
  * from a Circle-controlled wallet. Returns a challengeId that the frontend
  * then executes via the Web SDK (sdk.execute), which shows the user their
  * PIN prompt to actually authorize the send.
  *
- * Scoped to native USDC only for now — EURC/cirBTC are ERC-20 tokens and
- * need a slightly different request shape (tokenAddress + blockchain)
- * that hasn't been verified against Arc Testnet yet.
+ * Native USDC (no tokenAddress in the request) uses the native-transfer
+ * shape: just `blockchain`, no `tokenId`/`tokenAddress`. EURC/cirBTC are
+ * real ERC-20 contracts on Arc Testnet, so those pass `tokenAddress` +
+ * `blockchain` instead — Circle resolves the token from the contract
+ * address on that chain rather than needing Circle's internal tokenId.
  */
 router.post("/circle/transfer-challenge", async (req, res) => {
   if (!requireApiKey(res)) return;
-  const { userToken, walletId, destinationAddress, amount } = req.body || {};
+  const { userToken, walletId, destinationAddress, amount, tokenAddress } = req.body || {};
   if (!userToken || !walletId || !destinationAddress || !amount) {
     return res.status(400).json({ error: "Missing required fields." });
   }
   try {
+    const body = {
+      idempotencyKey: crypto.randomUUID(),
+      walletId,
+      destinationAddress,
+      amounts: [String(amount)],
+      feeLevel: "MEDIUM",
+      blockchain: PRIMARY_BLOCKCHAIN,
+    };
+    // Only attach tokenAddress for ERC-20 sends (EURC/cirBTC). Native USDC
+    // sends must omit it entirely, or Circle tries to resolve it as a token.
+    if (tokenAddress) body.tokenAddress = tokenAddress;
+
     const response = await fetch(`${CIRCLE_BASE_URL}/v1/w3s/user/transactions/transfer`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+        "X-User-Token": userToken,
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json(data);
+    res.json(data.data); // { challengeId }
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Failed to create transfer challenge." });
+  }
+});
+
+/**
+ * POST /api/circle/contract-execution-challenge
+ *
+ * Phase 2c: creates a Circle "contract execution" transaction challenge —
+ * the generic path for calling an arbitrary function on an arbitrary
+ * contract (mint / approve / lock / withdraw on the NFT + vault
+ * contracts), as opposed to the token-transfer-specific challenge above.
+ * Same execute-with-PIN flow on the frontend afterwards.
+ *
+ * NOTE: this hasn't been exercised against a live Circle account from this
+ * environment (no network path to api.circle.com from the sandbox) — the
+ * request shape mirrors Circle's documented contractExecution endpoint,
+ * but treat the first real call as a live test and check the response
+ * body closely if it 4xxs.
+ */
+router.post("/circle/contract-execution-challenge", async (req, res) => {
+  if (!requireApiKey(res)) return;
+  const { userToken, walletId, contractAddress, abiFunctionSignature, abiParameters } = req.body || {};
+  if (!userToken || !walletId || !contractAddress || !abiFunctionSignature) {
+    return res.status(400).json({ error: "Missing required fields." });
+  }
+  try {
+    const response = await fetch(`${CIRCLE_BASE_URL}/v1/w3s/user/transactions/contractExecution`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -180,16 +231,51 @@ router.post("/circle/transfer-challenge", async (req, res) => {
       body: JSON.stringify({
         idempotencyKey: crypto.randomUUID(),
         walletId,
-        destinationAddress,
-        amounts: [String(amount)],
+        contractAddress,
+        abiFunctionSignature,
+        abiParameters: abiParameters || [],
         feeLevel: "MEDIUM",
-        blockchain: PRIMARY_BLOCKCHAIN, // required for native transfers when tokenId isn't set
+        blockchain: PRIMARY_BLOCKCHAIN,
       }),
     });
     const data = await response.json();
     if (!response.ok) return res.status(response.status).json(data);
     res.json(data.data); // { challengeId }
   } catch (err) {
-    res.status(500).json({ error: err.message || "Failed to create transfer challenge." });
+    res.status(500).json({ error: err.message || "Failed to create contract execution challenge." });
   }
 });
+
+/**
+ * GET /api/circle/transaction
+ *
+ * Phase 2c support: after a contract-execution challenge is approved via
+ * the Web SDK, we only get a local "it succeeded" callback — not the
+ * resulting txHash. Circle's own transaction list is how the frontend
+ * finds the matching transaction afterwards (filtered + sorted client
+ * side by contractAddress/createDate) so it can then read the on-chain
+ * receipt directly via a plain RPC call and parse logs (tokenId minted,
+ * lockId created, etc.) the same way it already does for MetaMask users.
+ */
+router.get("/circle/transactions", async (req, res) => {
+  if (!requireApiKey(res)) return;
+  const userToken = req.query.userToken;
+  if (!userToken) return res.status(400).json({ error: "Missing userToken." });
+  try {
+    const response = await fetch(`${CIRCLE_BASE_URL}/v1/w3s/transactions?pageSize=10`, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+        "X-User-Token": userToken,
+      },
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json(data);
+    res.json(data.data); // { transactions: [...] }
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Failed to list transactions." });
+  }
+});
+
+export default router;
