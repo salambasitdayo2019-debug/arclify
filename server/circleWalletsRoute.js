@@ -183,7 +183,7 @@ router.post("/circle/transfer-challenge", async (req, res) => {
         destinationAddress,
         amounts: [String(amount)],
         feeLevel: "MEDIUM",
-        // tokenId/tokenAddress intentionally omitted — native USDC transfer
+        blockchain: PRIMARY_BLOCKCHAIN, // required for native transfers when tokenId isn't set
       }),
     });
     const data = await response.json();
