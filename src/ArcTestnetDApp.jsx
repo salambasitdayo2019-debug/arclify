@@ -163,6 +163,59 @@ function pushTx(entry) {
 /*  matching App Kit's createEthersAdapterFromProvider pattern.         */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  Bridge — CCTP (Circle's Cross-Chain Transfer Protocol) config       */
+/*  Scoped to Ethereum Sepolia -> Arc Testnet, the direction Circle's   */
+/*  own quickstart documents end-to-end:                                */
+/*  developers.circle.com/cctp/quickstarts/transfer-usdc-ethereum-to-arc*/
+/* ------------------------------------------------------------------ */
+
+const ETH_SEPOLIA = {
+  chainIdHex: "0xaa36a7", // 11155111
+  chainId: 11155111,
+  chainName: "Ethereum Sepolia",
+  nativeCurrency: { name: "Sepolia ETH", symbol: "ETH", decimals: 18 },
+  rpcUrls: ["https://rpc.sepolia.org"],
+  blockExplorerUrls: ["https://sepolia.etherscan.io"],
+};
+
+// Contract addresses + domain IDs straight from Circle's official
+// Ethereum Sepolia -> Arc testnet CCTP quickstart (verified, not guessed).
+const CCTP = {
+  ETH_SEPOLIA_DOMAIN: 0,
+  ARC_TESTNET_DOMAIN: 26,
+  ETH_SEPOLIA_USDC: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+  ETH_SEPOLIA_TOKEN_MESSENGER: "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
+  ARC_TESTNET_MESSAGE_TRANSMITTER: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
+};
+
+const CCTP_USDC_DECIMALS = 6; // standard ERC-20 USDC on Sepolia, unlike Arc's native 18-decimal USDC
+
+// Chain switching via the already-connected ethers BrowserProvider (its
+// .send() forwards arbitrary RPC methods straight to the underlying
+// wallet), so Bridge doesn't need access to the raw EIP-1193 provider —
+// just the same `provider` every other page already gets from `wallet`.
+async function switchViaProvider(browserProvider, chainConfig) {
+  try {
+    await browserProvider.send("wallet_switchEthereumChain", [{ chainId: chainConfig.chainIdHex }]);
+  } catch (switchErr) {
+    const code = switchErr?.code ?? switchErr?.error?.code ?? switchErr?.info?.error?.code;
+    if (code === 4902) {
+      await browserProvider.send("wallet_addEthereumChain", [
+        {
+          chainId: chainConfig.chainIdHex,
+          chainName: chainConfig.chainName,
+          nativeCurrency: chainConfig.nativeCurrency,
+          rpcUrls: chainConfig.rpcUrls,
+          blockExplorerUrls: chainConfig.blockExplorerUrls,
+        },
+      ]);
+    } else {
+      throw switchErr;
+    }
+  }
+}
+
 async function switchToArc(rawProvider) {
   if (!rawProvider?.request) return;
   try {
@@ -1227,6 +1280,7 @@ const NAV_ITEMS = [
   "Transfer",
   "Bulk Transfer",
   "Swap",
+  "Bridge",
   "NFT Lock",
   "History",
   "Leaderboard",
@@ -1810,6 +1864,171 @@ function SwapPage({ wallet }) {
         </p>
       )}
       {errorMsg && <p className="mt-3 text-xs text-rose-300">{errorMsg}</p>}
+    </GlassCard>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Page: Bridge — CCTP, Ethereum Sepolia -> Arc Testnet                */
+/*  Real burn-and-mint (not a wrapped token): USDC is burned on Sepolia */
+/*  and native USDC is minted fresh on Arc once Circle attests to the   */
+/*  burn. Both legs are signed by the user's own connected wallet, so   */
+/*  this only supports MetaMask/WalletConnect for now — Circle Wallets  */
+/*  (email login) are currently initialized for Arc only.               */
+/* ------------------------------------------------------------------ */
+
+const SEPOLIA_USDC_ABI = [
+  "function approve(address spender, uint256 amount) returns (bool)",
+];
+
+const TOKEN_MESSENGER_ABI = [
+  "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)",
+];
+
+const MESSAGE_TRANSMITTER_ABI = [
+  "function receiveMessage(bytes message, bytes attestation)",
+];
+
+function BridgePage({ wallet }) {
+  const [amount, setAmount] = useState("");
+  const [status, setStatus] = useState("idle"); // idle | switching | approving | burning | attesting | minting | done | error
+  const [log, setLog] = useState([]);
+  const [error, setError] = useState(null);
+  const busy = status !== "idle" && status !== "done" && status !== "error";
+
+  const appendLog = (line) => setLog((l) => [...l, line]);
+
+  const runBridge = useCallback(async () => {
+    if (!wallet.provider || !wallet.address) {
+      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      return;
+    }
+    if (!amount || Number(amount) <= 0) {
+      toast({ tone: "bad", title: "Invalid amount", message: "Enter an amount to bridge." });
+      return;
+    }
+    setError(null);
+    setLog([]);
+    try {
+      setStatus("switching");
+      appendLog("Switching wallet to Ethereum Sepolia…");
+      await switchViaProvider(wallet.provider, ETH_SEPOLIA);
+      // A fresh signer, bound to whatever chain the wallet is on right now
+      // that the network switch above just changed.
+      const sepoliaSigner = await wallet.provider.getSigner();
+
+      setStatus("approving");
+      appendLog("Approving USDC for the CCTP TokenMessenger…");
+      const usdc = new ethers.Contract(CCTP.ETH_SEPOLIA_USDC, SEPOLIA_USDC_ABI, sepoliaSigner);
+      const amountUnits = ethers.parseUnits(amount, CCTP_USDC_DECIMALS);
+      const approveTx = await usdc.approve(CCTP.ETH_SEPOLIA_TOKEN_MESSENGER, amountUnits);
+      await approveTx.wait();
+      appendLog(`Approved — ${approveTx.hash.slice(0, 14)}…`);
+
+      setStatus("burning");
+      appendLog("Burning USDC on Ethereum Sepolia…");
+      const tokenMessenger = new ethers.Contract(CCTP.ETH_SEPOLIA_TOKEN_MESSENGER, TOKEN_MESSENGER_ABI, sepoliaSigner);
+      const mintRecipient = ethers.zeroPadValue(wallet.address, 32);
+      const burnTx = await tokenMessenger.depositForBurn(
+        amountUnits,
+        CCTP.ARC_TESTNET_DOMAIN,
+        mintRecipient,
+        CCTP.ETH_SEPOLIA_USDC,
+        ethers.ZeroHash, // destinationCaller — zero allows any address to call receiveMessage
+        500n, // maxFee (0.0005 USDC) — same default as Circle's own quickstart
+        1000 // minFinalityThreshold — 1000 or less selects Fast Transfer
+      );
+      await burnTx.wait();
+      appendLog(`Burned — ${burnTx.hash.slice(0, 14)}…`);
+
+      setStatus("attesting");
+      appendLog("Waiting for Circle's attestation (usually under a minute)…");
+      let attestation = null;
+      for (let attempt = 0; attempt < 60; attempt++) {
+        const res = await fetch(`${API_BASE}/bridge/attestation?domain=${CCTP.ETH_SEPOLIA_DOMAIN}&txHash=${burnTx.hash}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.messages?.[0]?.status === "complete") {
+            attestation = data.messages[0];
+            break;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+      if (!attestation) {
+        throw new Error(
+          "Attestation didn't complete in time. Your USDC was burned on Sepolia — it isn't lost, but you'll need to complete the mint manually once Circle finishes attesting. Try again shortly."
+        );
+      }
+      appendLog("Attestation received.");
+
+      setStatus("minting");
+      appendLog("Switching wallet back to Arc Testnet…");
+      await switchViaProvider(wallet.provider, ARC_TESTNET);
+      const arcSigner = await wallet.provider.getSigner();
+      const transmitter = new ethers.Contract(CCTP.ARC_TESTNET_MESSAGE_TRANSMITTER, MESSAGE_TRANSMITTER_ABI, arcSigner);
+      appendLog("Minting USDC on Arc Testnet…");
+      const mintTx = await transmitter.receiveMessage(attestation.message, attestation.attestation);
+      await mintTx.wait();
+      appendLog(`Minted — ${mintTx.hash.slice(0, 14)}…`);
+
+      setStatus("done");
+      toast({ tone: "ok", title: "Bridge complete", message: `${amount} USDC arrived on Arc Testnet.` });
+    } catch (e) {
+      setError(e.shortMessage || e.message);
+      setStatus("error");
+      toast({ tone: "bad", title: "Bridge failed", message: e.shortMessage || e.message });
+    }
+  }, [wallet, amount]);
+
+  if (wallet.isCircleWallet) {
+    return (
+      <GlassCard className="p-6 max-w-lg">
+        <h2 className="text-white text-lg font-semibold mb-2">Bridge</h2>
+        <p className="text-white/50 text-sm">
+          Bridging isn't wired up for Circle Wallets (email login) yet — it
+          would need this Circle user to also hold a wallet on Ethereum
+          Sepolia, which is a separate build. Sign in with MetaMask or
+          WalletConnect to bridge USDC in from Ethereum Sepolia right now.
+        </p>
+      </GlassCard>
+    );
+  }
+
+  return (
+    <GlassCard className="p-6 max-w-lg">
+      <h2 className="text-white text-lg font-semibold mb-1">Bridge</h2>
+      <p className="text-white/40 text-xs mb-4">
+        Move USDC in from Ethereum Sepolia via Circle's CCTP — a real burn on
+        Sepolia and a fresh native mint on Arc, not a wrapped token. Your
+        wallet will prompt you to switch networks twice (Sepolia to burn,
+        Arc to mint).
+      </p>
+
+      <label className="text-white/50 text-xs">Amount (USDC on Ethereum Sepolia)</label>
+      <input
+        value={amount}
+        onChange={(e) => setAmount(e.target.value)}
+        placeholder="0.00"
+        disabled={busy}
+        className="w-full mt-1 mb-4 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+      />
+
+      <PrimaryButton disabled={busy} onClick={runBridge}>
+        {busy ? "Bridging…" : "Bridge to Arc Testnet"}
+      </PrimaryButton>
+
+      {log.length > 0 && (
+        <div className="mt-4 space-y-1">
+          {log.map((line, i) => (
+            <p key={i} className="text-white/60 text-xs font-mono">{line}</p>
+          ))}
+        </div>
+      )}
+      {error && <p className="mt-3 text-xs text-rose-300">{error}</p>}
+      {status === "done" && (
+        <p className="mt-3 text-xs text-emerald-300">Done — check your Dashboard balance.</p>
+      )}
     </GlassCard>
   );
 }
@@ -2588,6 +2807,7 @@ export default function ArcTestnetDApp() {
       case "Transfer": return <TransferPage wallet={effectiveWallet} />;
       case "Bulk Transfer": return <BulkTransferPage wallet={effectiveWallet} />;
       case "Swap": return <SwapPage wallet={effectiveWallet} />;
+      case "Bridge": return <BridgePage wallet={effectiveWallet} />;
       case "NFT Lock": return <NFTLockPage wallet={effectiveWallet} />;
       case "History": return <HistoryPage wallet={effectiveWallet} />;
       case "Leaderboard": return <LeaderboardPage wallet={effectiveWallet} />;
