@@ -2260,6 +2260,7 @@ function LendingPage({ wallet }) {
   const [withdrawAmount, setWithdrawAmount] = useState("");
   const [borrowAmount, setBorrowAmount] = useState("");
   const [repayAmount, setRepayAmount] = useState("");
+  const [fundAmount, setFundAmount] = useState("");
   const [busy, setBusy] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -2387,6 +2388,27 @@ function LendingPage({ wallet }) {
     }
   }, [wallet, repayAmount]);
 
+  const handleFundPool = useCallback(async () => {
+    if (!fundAmount || Number(fundAmount) <= 0) return;
+    setBusy(true);
+    try {
+      const amountUnits = ethers.parseUnits(fundAmount, STABLECOIN_DECIMALS);
+      await lendingApproveAndCall(wallet, {
+        tokenAddress: CONTRACTS.EURC,
+        amountUnits,
+        functionSignature: "fundPool(uint256)",
+        functionParams: [amountUnits],
+      });
+      toast({ tone: "ok", title: "Pool funded", message: `${fundAmount} EURC added to available liquidity.` });
+      setFundAmount("");
+      refresh();
+    } catch (e) {
+      toast({ tone: "bad", title: "Fund pool failed", message: e.shortMessage || e.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [wallet, fundAmount]);
+
   return (
     <GlassCard className="p-6 max-w-lg">
       <h2 className="text-white text-lg font-semibold mb-1">Lending</h2>
@@ -2474,6 +2496,22 @@ function LendingPage({ wallet }) {
             className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
           />
           <PrimaryButton disabled={busy} onClick={handleRepay}>Repay</PrimaryButton>
+        </div>
+      </div>
+
+      <div className="mt-6 pt-5 border-t border-white/10">
+        <p className="text-white/40 text-xs mb-2">
+          Fund the pool — adds EURC that anyone can borrow against their collateral. No individual yield tracking yet for suppliers (known limitation for this first version).
+        </p>
+        <div className="flex gap-2">
+          <input
+            value={fundAmount}
+            onChange={(e) => setFundAmount(e.target.value)}
+            placeholder="0.00"
+            disabled={busy}
+            className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+          />
+          <PrimaryButton disabled={busy} onClick={handleFundPool}>Fund Pool</PrimaryButton>
         </div>
       </div>
     </GlassCard>
