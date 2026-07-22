@@ -2163,7 +2163,13 @@ function NFTLockPage({ wallet }) {
   const lockNft = useCallback(async (tokenId) => {
     setBusy(true);
     try {
-      const unlockAt = Math.floor(Date.now() / 1000) + Number(duration) * 86400;
+      // "test2min" is a special-cased short duration for verifying the
+      // auto-withdraw watcher without waiting on a real 7/30/90-day lock —
+      // everything else is treated as whole days.
+      const unlockAt =
+        duration === "test2min"
+          ? Math.floor(Date.now() / 1000) + 120
+          : Math.floor(Date.now() / 1000) + Number(duration) * 86400;
       let receipt;
       if (wallet.isCircleWallet) {
         // approve() then lock() — two sequential PIN-approved transactions,
@@ -2200,7 +2206,14 @@ function NFTLockPage({ wallet }) {
       setMintedIds(nextMinted);
       writeLS(LS_MINTED_KEY, nextMinted);
 
-      toast({ tone: "ok", title: "NFT locked", message: `Token #${tokenId} locked for ${duration} day(s).` });
+      toast({
+        tone: "ok",
+        title: "NFT locked",
+        message:
+          duration === "test2min"
+            ? `Token #${tokenId} locked for 2 minutes (testing).`
+            : `Token #${tokenId} locked for ${duration} day(s).`,
+      });
     } catch (e) {
       toast({ tone: "bad", title: "Lock failed", message: e.shortMessage || e.message });
     } finally {
@@ -2246,6 +2259,7 @@ function NFTLockPage({ wallet }) {
               onChange={(e) => setDuration(e.target.value)}
               className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
             >
+              <option value="test2min">2 minutes (testing)</option>
               <option value="7">7 days</option>
               <option value="30">30 days</option>
               <option value="90">90 days</option>
