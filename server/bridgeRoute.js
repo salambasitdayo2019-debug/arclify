@@ -54,4 +54,29 @@ router.get("/bridge/attestation", async (req, res) => {
   }
 });
 
+/**
+ * GET /api/bridge/fee?sourceDomain=<n>&destDomain=<n>
+ *
+ * Proxies Circle's live Fast Transfer fee lookup. Circle explicitly warns
+ * against hardcoding this — the fee changes over time, and if the
+ * maxFee passed to depositForBurn ends up below whatever Circle is
+ * currently charging, the transfer silently downgrades to a Standard
+ * Transfer (waiting for full source-chain finality) instead of erroring,
+ * which is exactly what happened on the first live test of this feature:
+ * a hardcoded maxFee that used to be enough was later "insufficient_fee".
+ */
+router.get("/bridge/fee", async (req, res) => {
+  const { sourceDomain, destDomain } = req.query;
+  if (sourceDomain === undefined || destDomain === undefined) {
+    return res.status(400).json({ error: "Missing sourceDomain or destDomain." });
+  }
+  try {
+    const response = await fetch(`${IRIS_BASE_URL}/v2/burn/USDC/fees/${sourceDomain}/${destDomain}`);
+    const data = await response.json().catch(() => ({}));
+    res.status(response.status).json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Failed to fetch fee." });
+  }
+});
+
 export default router;
