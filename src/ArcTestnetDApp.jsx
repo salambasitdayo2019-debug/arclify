@@ -25,10 +25,12 @@ const ARC_TESTNET = {
 };
 
 const CONTRACTS = {
-  USDC: "0x3600000000000000000000000000000000000000",
+  USDC: "0x3600000000000000000000000000000000000000", // Arc's optional ERC-20 interface for native USDC — not used elsewhere in the app (Transfer/Dashboard use native currency directly), but this is exactly what Lending needs since it treats collateral as a plain ERC-20
   EURC: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
   cirBTC: "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF",
 };
+
+const LENDING_POOL_ADDRESS = "0x63F38a7cf59BcC8FBaB11D4F84747ae0b9357267";
 
 // Circle stablecoins (USDC, EURC) always use 6 decimals — hardcoding this
 // avoids an extra RPC round trip per token, which matters on Arc Testnet's
@@ -145,9 +147,83 @@ async function performLockWithdraw(wallet, lockId) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  LocalStorage-backed simulation layer                               */
-/*  (Dashboard / History / Leaderboard / NFT Lock / Bulk Transfer      */
-/*   still run on a local mock ledger — Circle App Kit has no          */
+/*  Lending — ArclifyLendingPool.sol, deployed via Remix               */
+/*  Deposit USDC (via Arc's ERC-20 interface) as collateral, borrow    */
+/*  EURC against it. Fixed exchange rate + fixed interest rate (not a  */
+/*  live oracle or utilization curve) — see the contract's own header  */
+/*  comment for the full reasoning behind each simplification.         */
+/* ------------------------------------------------------------------ */
+
+const LENDING_ERC20_ABI = [
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function balanceOf(address account) view returns (uint256)",
+];
+
+const LENDING_POOL_ABI = [
+  "function depositCollateral(uint256 amount)",
+  "function withdrawCollateral(uint256 amount)",
+  "function borrow(uint256 amount)",
+  "function repay(uint256 amount)",
+  "function fundPool(uint256 amount)",
+  "function liquidate(address borrower)",
+  "function isLiquidatable(address borrower) view returns (bool)",
+  "function getCurrentDebt(address user) view returns (uint256)",
+  "function getMaxBorrowable(address user) view returns (uint256)",
+  "function usdcValueInEurc(uint256 usdcAmount) view returns (uint256)",
+  "function availableLiquidity() view returns (uint256)",
+  "function positions(address) view returns (uint256 collateralAmount, uint256 principal, uint256 lastAccrualTime)",
+  "function exchangeRate() view returns (uint256)",
+  "function collateralFactorBps() view returns (uint256)",
+  "function liquidationThresholdBps() view returns (uint256)",
+  "function interestRateBps() view returns (uint256)",
+];
+
+// Wallet-agnostic "approve token, then call the pool" — used by both
+// depositCollateral (approve USDC) and repay (approve EURC). Mirrors the
+// same two-step approve-then-act pattern NFT Lock's circleExecuteContract
+// path already established.
+async function lendingApproveAndCall(wallet, { tokenAddress, amountUnits, functionSignature, functionParams }) {
+  if (wallet.isCircleWallet) {
+    await wallet.circleExecuteContract({
+      contractAddress: tokenAddress,
+      abiFunctionSignature: "approve(address,uint256)",
+      abiParameters: [LENDING_POOL_ADDRESS, String(amountUnits)],
+    });
+    await wallet.circleExecuteContract({
+      contractAddress: LENDING_POOL_ADDRESS,
+      abiFunctionSignature: functionSignature,
+      abiParameters: functionParams.map(String),
+    });
+  } else {
+    const signer = await wallet.provider.getSigner();
+    const token = new ethers.Contract(tokenAddress, LENDING_ERC20_ABI, signer);
+    const approveTx = await withRpcRetry(() => token.approve(LENDING_POOL_ADDRESS, amountUnits));
+    await withRpcRetry(() => approveTx.wait());
+    const pool = new ethers.Contract(LENDING_POOL_ADDRESS, LENDING_POOL_ABI, signer);
+    const fnName = functionSignature.split("(")[0];
+    const tx = await withRpcRetry(() => pool[fnName](...functionParams));
+    await withRpcRetry(() => tx.wait());
+  }
+}
+
+// For pool calls that don't need a prior approval (borrow, withdraw —
+// the pool is sending TO the user, not pulling FROM them).
+async function lendingCall(wallet, { functionSignature, functionParams }) {
+  if (wallet.isCircleWallet) {
+    await wallet.circleExecuteContract({
+      contractAddress: LENDING_POOL_ADDRESS,
+      abiFunctionSignature: functionSignature,
+      abiParameters: functionParams.map(String),
+    });
+  } else {
+    const signer = await wallet.provider.getSigner();
+    const pool = new ethers.Contract(LENDING_POOL_ADDRESS, LENDING_POOL_ABI, signer);
+    const fnName = functionSignature.split("(")[0];
+    const tx = await withRpcRetry(() => pool[fnName](...functionParams));
+    await withRpcRetry(() => tx.wait());
+  }
+}
 /*   capability for NFT locks or leaderboards, so those stay custom.)  */
 /* ------------------------------------------------------------------ */
 
@@ -1369,6 +1445,7 @@ const NAV_ITEMS = [
   "Bulk Transfer",
   "Swap",
   "Bridge",
+  "Lending",
   "NFT Lock",
   "History",
   "Leaderboard",
@@ -2167,6 +2244,238 @@ function BridgePage({ wallet }) {
       {status === "done" && (
         <p className="mt-3 text-xs text-emerald-300">Done — check your Dashboard balance.</p>
       )}
+    </GlassCard>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Page: Lending — ArclifyLendingPool.sol                             */
+/*  Deposit USDC as collateral, borrow EURC against it.                */
+/* ------------------------------------------------------------------ */
+
+function LendingPage({ wallet }) {
+  const [account, setAccount] = useState(null); // { collateral, debt, maxBorrowable, liquidatable, availableLiquidity }
+  const [poolInfo, setPoolInfo] = useState(null); // { exchangeRate, collateralFactorBps, liquidationThresholdBps, interestRateBps }
+  const [depositAmount, setDepositAmount] = useState("");
+  const [withdrawAmount, setWithdrawAmount] = useState("");
+  const [borrowAmount, setBorrowAmount] = useState("");
+  const [repayAmount, setRepayAmount] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const loadAccount = useCallback(async () => {
+    if (!wallet.address) return;
+    const provider = wallet.provider || readOnlyProvider;
+    const pool = new ethers.Contract(LENDING_POOL_ADDRESS, LENDING_POOL_ABI, provider);
+    try {
+      const [position, debt, maxBorrowable, liquidatable, liquidity, rate, cf, lt, ir] = await Promise.all([
+        withRpcRetry(() => pool.positions(wallet.address)),
+        withRpcRetry(() => pool.getCurrentDebt(wallet.address)),
+        withRpcRetry(() => pool.getMaxBorrowable(wallet.address)),
+        withRpcRetry(() => pool.isLiquidatable(wallet.address)),
+        withRpcRetry(() => pool.availableLiquidity()),
+        withRpcRetry(() => pool.exchangeRate()),
+        withRpcRetry(() => pool.collateralFactorBps()),
+        withRpcRetry(() => pool.liquidationThresholdBps()),
+        withRpcRetry(() => pool.interestRateBps()),
+      ]);
+      setAccount({
+        collateral: ethers.formatUnits(position.collateralAmount, STABLECOIN_DECIMALS),
+        debt: ethers.formatUnits(debt, STABLECOIN_DECIMALS),
+        maxBorrowable: ethers.formatUnits(maxBorrowable, STABLECOIN_DECIMALS),
+        liquidatable,
+        availableLiquidity: ethers.formatUnits(liquidity, STABLECOIN_DECIMALS),
+      });
+      setPoolInfo({
+        exchangeRate: Number(rate) / 1_000_000,
+        collateralFactorBps: Number(cf),
+        liquidationThresholdBps: Number(lt),
+        interestRateBps: Number(ir),
+      });
+    } catch (e) {
+      console.warn("Failed to load lending account data:", e);
+    }
+  }, [wallet.provider, wallet.address, refreshKey]);
+
+  useEffect(() => {
+    loadAccount();
+  }, [loadAccount]);
+
+  const refresh = () => setRefreshKey((k) => k + 1);
+
+  const handleDeposit = useCallback(async () => {
+    if (!wallet.address) {
+      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      return;
+    }
+    if (!depositAmount || Number(depositAmount) <= 0) return;
+    setBusy(true);
+    try {
+      const amountUnits = ethers.parseUnits(depositAmount, STABLECOIN_DECIMALS);
+      await lendingApproveAndCall(wallet, {
+        tokenAddress: CONTRACTS.USDC,
+        amountUnits,
+        functionSignature: "depositCollateral(uint256)",
+        functionParams: [amountUnits],
+      });
+      toast({ tone: "ok", title: "Collateral deposited", message: `${depositAmount} USDC added.` });
+      setDepositAmount("");
+      refresh();
+    } catch (e) {
+      toast({ tone: "bad", title: "Deposit failed", message: e.shortMessage || e.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [wallet, depositAmount]);
+
+  const handleWithdraw = useCallback(async () => {
+    if (!withdrawAmount || Number(withdrawAmount) <= 0) return;
+    setBusy(true);
+    try {
+      const amountUnits = ethers.parseUnits(withdrawAmount, STABLECOIN_DECIMALS);
+      await lendingCall(wallet, {
+        functionSignature: "withdrawCollateral(uint256)",
+        functionParams: [amountUnits],
+      });
+      toast({ tone: "ok", title: "Collateral withdrawn", message: `${withdrawAmount} USDC returned.` });
+      setWithdrawAmount("");
+      refresh();
+    } catch (e) {
+      toast({ tone: "bad", title: "Withdraw failed", message: e.shortMessage || e.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [wallet, withdrawAmount]);
+
+  const handleBorrow = useCallback(async () => {
+    if (!borrowAmount || Number(borrowAmount) <= 0) return;
+    setBusy(true);
+    try {
+      const amountUnits = ethers.parseUnits(borrowAmount, STABLECOIN_DECIMALS);
+      await lendingCall(wallet, {
+        functionSignature: "borrow(uint256)",
+        functionParams: [amountUnits],
+      });
+      toast({ tone: "ok", title: "Borrowed", message: `${borrowAmount} EURC sent to your wallet.` });
+      setBorrowAmount("");
+      refresh();
+    } catch (e) {
+      toast({ tone: "bad", title: "Borrow failed", message: e.shortMessage || e.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [wallet, borrowAmount]);
+
+  const handleRepay = useCallback(async () => {
+    if (!repayAmount || Number(repayAmount) <= 0) return;
+    setBusy(true);
+    try {
+      const amountUnits = ethers.parseUnits(repayAmount, STABLECOIN_DECIMALS);
+      await lendingApproveAndCall(wallet, {
+        tokenAddress: CONTRACTS.EURC,
+        amountUnits,
+        functionSignature: "repay(uint256)",
+        functionParams: [amountUnits],
+      });
+      toast({ tone: "ok", title: "Repaid", message: `${repayAmount} EURC repaid.` });
+      setRepayAmount("");
+      refresh();
+    } catch (e) {
+      toast({ tone: "bad", title: "Repay failed", message: e.shortMessage || e.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [wallet, repayAmount]);
+
+  return (
+    <GlassCard className="p-6 max-w-lg">
+      <h2 className="text-white text-lg font-semibold mb-1">Lending</h2>
+      <p className="text-white/40 text-xs mb-4">
+        Deposit USDC as collateral, borrow EURC against it. Fixed exchange
+        rate (not a live oracle) and fixed interest — a starting point, not
+        a production money market. Contract:{" "}
+        <span className="font-mono">{LENDING_POOL_ADDRESS.slice(0, 10)}…</span>
+      </p>
+
+      {account && (
+        <div className="grid grid-cols-2 gap-3 mb-5 text-sm">
+          <div className="bg-white/5 rounded-lg p-3">
+            <p className="text-white/40 text-xs">Your collateral</p>
+            <p className="text-white font-medium">{Number(account.collateral).toFixed(4)} USDC</p>
+          </div>
+          <div className="bg-white/5 rounded-lg p-3">
+            <p className="text-white/40 text-xs">Your debt</p>
+            <p className="text-white font-medium">{Number(account.debt).toFixed(4)} EURC</p>
+          </div>
+          <div className="bg-white/5 rounded-lg p-3">
+            <p className="text-white/40 text-xs">Max borrowable</p>
+            <p className="text-white font-medium">{Number(account.maxBorrowable).toFixed(4)} EURC</p>
+          </div>
+          <div className="bg-white/5 rounded-lg p-3">
+            <p className="text-white/40 text-xs">Pool liquidity</p>
+            <p className="text-white font-medium">{Number(account.availableLiquidity).toFixed(2)} EURC</p>
+          </div>
+        </div>
+      )}
+
+      {account?.liquidatable && (
+        <p className="mb-4 text-xs text-rose-300 bg-rose-950/40 border border-rose-500/30 rounded-lg p-3">
+          Your position is eligible for liquidation — your debt has exceeded the safe threshold. Repay some debt now to avoid losing your collateral.
+        </p>
+      )}
+
+      {poolInfo && (
+        <p className="text-white/30 text-[11px] mb-5">
+          Rate: 1 USDC = {poolInfo.exchangeRate.toFixed(4)} EURC · Max LTV {poolInfo.collateralFactorBps / 100}% · Liquidation at {poolInfo.liquidationThresholdBps / 100}% · {poolInfo.interestRateBps / 100}% APR
+        </p>
+      )}
+
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <label className="text-white/50 text-xs">Deposit collateral (USDC)</label>
+          <input
+            value={depositAmount}
+            onChange={(e) => setDepositAmount(e.target.value)}
+            placeholder="0.00"
+            disabled={busy}
+            className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+          />
+          <PrimaryButton disabled={busy} onClick={handleDeposit}>Deposit</PrimaryButton>
+        </div>
+        <div>
+          <label className="text-white/50 text-xs">Withdraw collateral (USDC)</label>
+          <input
+            value={withdrawAmount}
+            onChange={(e) => setWithdrawAmount(e.target.value)}
+            placeholder="0.00"
+            disabled={busy}
+            className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+          />
+          <PrimaryButton disabled={busy} onClick={handleWithdraw}>Withdraw</PrimaryButton>
+        </div>
+        <div>
+          <label className="text-white/50 text-xs">Borrow (EURC)</label>
+          <input
+            value={borrowAmount}
+            onChange={(e) => setBorrowAmount(e.target.value)}
+            placeholder="0.00"
+            disabled={busy}
+            className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+          />
+          <PrimaryButton disabled={busy} onClick={handleBorrow}>Borrow</PrimaryButton>
+        </div>
+        <div>
+          <label className="text-white/50 text-xs">Repay (EURC)</label>
+          <input
+            value={repayAmount}
+            onChange={(e) => setRepayAmount(e.target.value)}
+            placeholder="0.00"
+            disabled={busy}
+            className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+          />
+          <PrimaryButton disabled={busy} onClick={handleRepay}>Repay</PrimaryButton>
+        </div>
+      </div>
     </GlassCard>
   );
 }
@@ -3021,6 +3330,7 @@ export default function ArcTestnetDApp() {
       case "Bulk Transfer": return <BulkTransferPage wallet={effectiveWallet} />;
       case "Swap": return <SwapPage wallet={effectiveWallet} />;
       case "Bridge": return <BridgePage wallet={effectiveWallet} />;
+      case "Lending": return <LendingPage wallet={effectiveWallet} />;
       case "NFT Lock": return <NFTLockPage wallet={effectiveWallet} />;
       case "History": return <HistoryPage wallet={effectiveWallet} />;
       case "Leaderboard": return <LeaderboardPage wallet={effectiveWallet} />;
