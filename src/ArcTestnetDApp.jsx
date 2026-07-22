@@ -189,26 +189,65 @@ function pushTx(entry) {
 /*  developers.circle.com/cctp/quickstarts/transfer-usdc-ethereum-to-arc*/
 /* ------------------------------------------------------------------ */
 
-const ETH_SEPOLIA = {
-  chainIdHex: "0xaa36a7", // 11155111
-  chainId: 11155111,
-  chainName: "Ethereum Sepolia",
-  nativeCurrency: { name: "Sepolia ETH", symbol: "ETH", decimals: 18 },
-  rpcUrls: ["https://rpc.sepolia.org"],
-  blockExplorerUrls: ["https://sepolia.etherscan.io"],
+const ARC_TESTNET_DOMAIN = 26;
+
+// TokenMessengerV2 and MessageTransmitterV2 sit at the SAME address on
+// every one of Circle's EVM CCTP v2 testnets (deterministic/CREATE2
+// deployment) — confirmed against Circle's own @circle-fin/bridge-kit
+// package, not assumed. That's what makes adding more source chains here
+// mostly just new USDC addresses + domain IDs, not new contract logic.
+const CCTP_TOKEN_MESSENGER = "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA";
+const CCTP_USDC_DECIMALS = 6; // standard ERC-20 USDC decimals — same across all these source chains, unlike Arc's native 18-decimal USDC
+
+// One entry per supported Bridge source chain. Add more here later by
+// copying an entry — domain IDs and USDC addresses per Circle's own docs
+// and bridge-kit package.
+const BRIDGE_SOURCE_CHAINS = {
+  ETH_SEPOLIA: {
+    label: "Ethereum Sepolia",
+    domain: 0,
+    usdc: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+    chain: {
+      chainIdHex: "0xaa36a7", // 11155111
+      chainId: 11155111,
+      chainName: "Ethereum Sepolia",
+      nativeCurrency: { name: "Sepolia ETH", symbol: "ETH", decimals: 18 },
+      rpcUrls: ["https://rpc.sepolia.org"],
+      blockExplorerUrls: ["https://sepolia.etherscan.io"],
+    },
+  },
+  BASE_SEPOLIA: {
+    label: "Base Sepolia",
+    domain: 6,
+    usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    chain: {
+      chainIdHex: "0x14a34", // 84532
+      chainId: 84532,
+      chainName: "Base Sepolia",
+      nativeCurrency: { name: "Sepolia ETH", symbol: "ETH", decimals: 18 },
+      rpcUrls: ["https://sepolia.base.org"],
+      blockExplorerUrls: ["https://sepolia.basescan.org"],
+    },
+  },
+  AVAX_FUJI: {
+    label: "Avalanche Fuji",
+    domain: 1,
+    usdc: "0x5425890298aed601595a70AB815c96711a31Bc65",
+    chain: {
+      chainIdHex: "0xa869", // 43113
+      chainId: 43113,
+      chainName: "Avalanche Fuji Testnet",
+      nativeCurrency: { name: "Avalanche", symbol: "AVAX", decimals: 18 },
+      rpcUrls: ["https://api.avax-test.network/ext/bc/C/rpc"],
+      blockExplorerUrls: ["https://testnet.snowtrace.io"],
+    },
+  },
 };
 
-// Contract addresses + domain IDs straight from Circle's official
-// Ethereum Sepolia -> Arc testnet CCTP quickstart (verified, not guessed).
 const CCTP = {
-  ETH_SEPOLIA_DOMAIN: 0,
-  ARC_TESTNET_DOMAIN: 26,
-  ETH_SEPOLIA_USDC: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
-  ETH_SEPOLIA_TOKEN_MESSENGER: "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
+  ARC_TESTNET_DOMAIN,
   ARC_TESTNET_MESSAGE_TRANSMITTER: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
 };
-
-const CCTP_USDC_DECIMALS = 6; // standard ERC-20 USDC on Sepolia, unlike Arc's native 18-decimal USDC
 
 // Chain switching goes straight to window.ethereum, not through an ethers
 // provider instance — ethers v6's BrowserProvider throws "network changed"
@@ -1939,11 +1978,13 @@ const MESSAGE_TRANSMITTER_ABI = [
 ];
 
 function BridgePage({ wallet }) {
+  const [sourceKey, setSourceKey] = useState("ETH_SEPOLIA");
   const [amount, setAmount] = useState("");
   const [status, setStatus] = useState("idle"); // idle | switching | approving | burning | attesting | minting | done | error
   const [log, setLog] = useState([]);
   const [error, setError] = useState(null);
   const busy = status !== "idle" && status !== "done" && status !== "error";
+  const source = BRIDGE_SOURCE_CHAINS[sourceKey];
 
   const appendLog = (line) => setLog((l) => [...l, line]);
 
@@ -1960,21 +2001,21 @@ function BridgePage({ wallet }) {
     setLog([]);
     try {
       setStatus("switching");
-      appendLog("Switching wallet to Ethereum Sepolia…");
-      await switchViaEthereum(ETH_SEPOLIA);
+      appendLog(`Switching wallet to ${source.label}…`);
+      await switchViaEthereum(source.chain);
       // Deliberately a BRAND NEW BrowserProvider here, not wallet.provider.
       // Ethers v6 throws "network changed" if you call getSigner() on a
       // provider instance that was already used on a different chain —
       // even with staticNetwork left at its default — so every leg of
       // this flow gets its own fresh instance right after switching.
-      const sepoliaProvider = new ethers.BrowserProvider(window.ethereum);
-      const sepoliaSigner = await sepoliaProvider.getSigner();
+      const sourceProvider = new ethers.BrowserProvider(window.ethereum);
+      const sourceSigner = await sourceProvider.getSigner();
 
       setStatus("approving");
       appendLog("Approving USDC for the CCTP TokenMessenger…");
-      const usdc = new ethers.Contract(CCTP.ETH_SEPOLIA_USDC, SEPOLIA_USDC_ABI, sepoliaSigner);
+      const usdc = new ethers.Contract(source.usdc, SEPOLIA_USDC_ABI, sourceSigner);
       const amountUnits = ethers.parseUnits(amount, CCTP_USDC_DECIMALS);
-      const approveTx = await withRpcRetry(() => usdc.approve(CCTP.ETH_SEPOLIA_TOKEN_MESSENGER, amountUnits));
+      const approveTx = await withRpcRetry(() => usdc.approve(CCTP_TOKEN_MESSENGER, amountUnits));
       await withRpcRetry(() => approveTx.wait());
       appendLog(`Approved — ${approveTx.hash.slice(0, 14)}…`);
 
@@ -1988,7 +2029,7 @@ function BridgePage({ wallet }) {
       appendLog("Checking the current Fast Transfer fee…");
       let maxFee = 500n; // fallback only if the fee lookup itself fails
       try {
-        const feeRes = await fetch(`${API_BASE}/bridge/fee?sourceDomain=${CCTP.ETH_SEPOLIA_DOMAIN}&destDomain=${CCTP.ARC_TESTNET_DOMAIN}`);
+        const feeRes = await fetch(`${API_BASE}/bridge/fee?sourceDomain=${source.domain}&destDomain=${CCTP.ARC_TESTNET_DOMAIN}`);
         if (feeRes.ok) {
           const fees = await feeRes.json();
           const minimumFeeBps = fees?.[0]?.minimumFee;
@@ -2008,15 +2049,15 @@ function BridgePage({ wallet }) {
       }
 
       setStatus("burning");
-      appendLog("Burning USDC on Ethereum Sepolia…");
-      const tokenMessenger = new ethers.Contract(CCTP.ETH_SEPOLIA_TOKEN_MESSENGER, TOKEN_MESSENGER_ABI, sepoliaSigner);
+      appendLog(`Burning USDC on ${source.label}…`);
+      const tokenMessenger = new ethers.Contract(CCTP_TOKEN_MESSENGER, TOKEN_MESSENGER_ABI, sourceSigner);
       const mintRecipient = ethers.zeroPadValue(wallet.address, 32);
       const burnTx = await withRpcRetry(() =>
         tokenMessenger.depositForBurn(
           amountUnits,
           CCTP.ARC_TESTNET_DOMAIN,
           mintRecipient,
-          CCTP.ETH_SEPOLIA_USDC,
+          source.usdc,
           ethers.ZeroHash, // destinationCaller — zero allows any address to call receiveMessage
           maxFee,
           1000 // minFinalityThreshold — 1000 or less selects Fast Transfer
@@ -2029,7 +2070,7 @@ function BridgePage({ wallet }) {
       appendLog("Waiting for Circle's attestation (usually under a minute)…");
       let attestation = null;
       for (let attempt = 0; attempt < 60; attempt++) {
-        const res = await fetch(`${API_BASE}/bridge/attestation?domain=${CCTP.ETH_SEPOLIA_DOMAIN}&txHash=${burnTx.hash}`);
+        const res = await fetch(`${API_BASE}/bridge/attestation?domain=${source.domain}&txHash=${burnTx.hash}`);
         if (res.ok) {
           const data = await res.json();
           if (data?.messages?.[0]?.status === "complete") {
@@ -2041,7 +2082,7 @@ function BridgePage({ wallet }) {
       }
       if (!attestation) {
         throw new Error(
-          "Attestation didn't complete in time. Your USDC was burned on Sepolia — it isn't lost, but you'll need to complete the mint manually once Circle finishes attesting. Try again shortly."
+          `Attestation didn't complete in time. Your USDC was burned on ${source.label} — it isn't lost, but you'll need to complete the mint manually once Circle finishes attesting. Try again shortly.`
         );
       }
       appendLog("Attestation received.");
@@ -2064,7 +2105,7 @@ function BridgePage({ wallet }) {
       setStatus("error");
       toast({ tone: "bad", title: "Bridge failed", message: e.shortMessage || e.message });
     }
-  }, [wallet, amount]);
+  }, [wallet, amount, source]);
 
   if (wallet.isCircleWallet) {
     return (
@@ -2072,9 +2113,9 @@ function BridgePage({ wallet }) {
         <h2 className="text-white text-lg font-semibold mb-2">Bridge</h2>
         <p className="text-white/50 text-sm">
           Bridging isn't wired up for Circle Wallets (email login) yet — it
-          would need this Circle user to also hold a wallet on Ethereum
-          Sepolia, which is a separate build. Sign in with MetaMask or
-          WalletConnect to bridge USDC in from Ethereum Sepolia right now.
+          would need this Circle user to also hold a wallet on the source
+          chain too, which is a separate build. Sign in with MetaMask or
+          WalletConnect to bridge USDC in right now.
         </p>
       </GlassCard>
     );
@@ -2084,13 +2125,25 @@ function BridgePage({ wallet }) {
     <GlassCard className="p-6 max-w-lg">
       <h2 className="text-white text-lg font-semibold mb-1">Bridge</h2>
       <p className="text-white/40 text-xs mb-4">
-        Move USDC in from Ethereum Sepolia via Circle's CCTP — a real burn on
-        Sepolia and a fresh native mint on Arc, not a wrapped token. Your
-        wallet will prompt you to switch networks twice (Sepolia to burn,
-        Arc to mint).
+        Move USDC in from another testnet via Circle's CCTP — a real burn on
+        the source chain and a fresh native mint on Arc, not a wrapped
+        token. Your wallet will prompt you to switch networks twice
+        (source chain to burn, Arc to mint).
       </p>
 
-      <label className="text-white/50 text-xs">Amount (USDC on Ethereum Sepolia)</label>
+      <label className="text-white/50 text-xs">From</label>
+      <select
+        value={sourceKey}
+        onChange={(e) => setSourceKey(e.target.value)}
+        disabled={busy}
+        className="w-full mt-1 mb-4 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+      >
+        {Object.entries(BRIDGE_SOURCE_CHAINS).map(([key, cfg]) => (
+          <option key={key} value={key}>{cfg.label}</option>
+        ))}
+      </select>
+
+      <label className="text-white/50 text-xs">Amount (USDC on {source.label})</label>
       <input
         value={amount}
         onChange={(e) => setAmount(e.target.value)}
