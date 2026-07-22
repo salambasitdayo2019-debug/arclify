@@ -125,6 +125,25 @@ const NFT_LOCK_ABI = [
   "event Locked(uint256 indexed lockId, address indexed owner, address nftContract, uint256 tokenId, uint256 unlockAt)",
 ];
 
+// Shared between NFTLockPage's manual "Withdraw" button and the app-level
+// auto-watch notification's "Withdraw now" toast action, so both paths
+// stay in sync rather than drifting into two slightly different
+// implementations over time.
+async function performLockWithdraw(wallet, lockId) {
+  if (wallet.isCircleWallet) {
+    await wallet.circleExecuteContract({
+      contractAddress: NFT_LOCK_VAULT_ADDRESS,
+      abiFunctionSignature: "withdraw(uint256)",
+      abiParameters: [String(lockId)],
+    });
+  } else {
+    const signer = await wallet.provider.getSigner();
+    const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, signer);
+    const tx = await vault.withdraw(lockId);
+    await tx.wait();
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  LocalStorage-backed simulation layer                               */
 /*  (Dashboard / History / Leaderboard / NFT Lock / Bulk Transfer      */
@@ -916,9 +935,9 @@ function CopyButton({ value, className = "" }) {
 /* ------------------------------------------------------------------ */
 
 let toastListeners = [];
-function toast({ tone = "neutral", title, message }) {
+function toast({ tone = "neutral", title, message, action }) {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const entry = { id, tone, title, message };
+  const entry = { id, tone, title, message, action };
   toastListeners.forEach((fn) => fn(entry));
   return id;
 }
@@ -929,9 +948,13 @@ function ToastViewport() {
   useEffect(() => {
     const onToast = (entry) => {
       setItems((prev) => [...prev, entry]);
+      // Toasts with an action (e.g. "Withdraw now") stay up longer —
+      // giving the person time to notice and tap it, rather than
+      // disappearing at the same 6s pace as a plain status message.
+      const ttl = entry.action ? 20000 : 6000;
       setTimeout(() => {
         setItems((prev) => prev.filter((t) => t.id !== entry.id));
-      }, 6000);
+      }, ttl);
     };
     toastListeners.push(onToast);
     return () => {
@@ -955,6 +978,17 @@ function ToastViewport() {
         >
           {t.title && <p className="text-white text-sm font-medium mb-0.5">{t.title}</p>}
           {t.message && <p className="text-white/60 text-xs break-all">{t.message}</p>}
+          {t.action && (
+            <button
+              onClick={() => {
+                t.action.onClick?.();
+                setItems((prev) => prev.filter((item) => item.id !== t.id));
+              }}
+              className="mt-2 text-xs font-medium text-cyan-300 hover:text-cyan-200 transition"
+            >
+              {t.action.label} →
+            </button>
+          )}
         </div>
       ))}
     </div>
@@ -2177,17 +2211,7 @@ function NFTLockPage({ wallet }) {
   const withdrawLock = useCallback(async (lockId) => {
     setBusy(true);
     try {
-      if (wallet.isCircleWallet) {
-        await wallet.circleExecuteContract({
-          contractAddress: NFT_LOCK_VAULT_ADDRESS,
-          abiFunctionSignature: "withdraw(uint256)",
-          abiParameters: [String(lockId)],
-        });
-      } else {
-        const { vault } = await getContracts();
-        const tx = await vault.withdraw(lockId);
-        await tx.wait();
-      }
+      await performLockWithdraw(wallet, lockId);
       toast({ tone: "ok", title: "Withdrawn", message: `Lock #${lockId} withdrawn.` });
       setLockDetails((prev) => ({ ...prev, [lockId]: { ...prev[lockId], withdrawn: true } }));
     } catch (e) {
@@ -2195,7 +2219,7 @@ function NFTLockPage({ wallet }) {
     } finally {
       setBusy(false);
     }
-  }, [wallet, getContracts]);
+  }, [wallet]);
 
   return (
     <GlassCard className="p-6 max-w-lg">
@@ -2756,6 +2780,75 @@ function ContactFooter() {
 /*  App shell                                                           */
 /* ------------------------------------------------------------------ */
 
+// Background watcher for NFT Lock unlocks — runs regardless of which page
+// is currently open, so a lock unlocking while the user is on Dashboard
+// or mid-Swap still surfaces immediately rather than only being noticed
+// on a manual visit to NFT Lock. Can't silently withdraw on its own (no
+// wallet type here can sign without the user present — MetaMask needs a
+// popup confirmation, Circle needs a PIN), so this notifies the moment a
+// lock becomes eligible and lets one tap finish it.
+function useNftLockAutoWatch(wallet, isLoggedIn) {
+  const walletRef = useRef(wallet);
+  walletRef.current = wallet;
+  const notifiedRef = useRef(new Set());
+  const withdrawingRef = useRef(new Set());
+
+  useEffect(() => {
+    if (!isLoggedIn || !wallet.address) return;
+    let cancelled = false;
+
+    async function checkLocks() {
+      const lockIds = readLS(LS_LOCK_IDS_KEY, []);
+      if (lockIds.length === 0) return;
+      const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, readOnlyProvider);
+      for (const id of lockIds) {
+        if (cancelled) return;
+        if (notifiedRef.current.has(id)) continue;
+        try {
+          const l = await vault.getLock(id);
+          if (l.withdrawn) {
+            notifiedRef.current.add(id); // already handled, nothing to notify about
+            continue;
+          }
+          if (!l.canWithdraw) continue;
+
+          notifiedRef.current.add(id);
+          toast({
+            tone: "ok",
+            title: "NFT Lock unlocked",
+            message: `Lock #${id} (token #${l.tokenId}) is ready to withdraw.`,
+            action: {
+              label: "Withdraw now",
+              onClick: async () => {
+                if (withdrawingRef.current.has(id)) return;
+                withdrawingRef.current.add(id);
+                try {
+                  await performLockWithdraw(walletRef.current, id);
+                  toast({ tone: "ok", title: "Withdrawn", message: `Lock #${id} withdrawn.` });
+                } catch (e) {
+                  toast({ tone: "bad", title: "Withdraw failed", message: e.shortMessage || e.message });
+                } finally {
+                  withdrawingRef.current.delete(id);
+                }
+              },
+            },
+          });
+        } catch {
+          // Read failed (RPC hiccup, unknown lockId, etc.) — skip for now,
+          // it'll retry on the next poll cycle rather than erroring out.
+        }
+      }
+    }
+
+    checkLocks();
+    const interval = setInterval(checkLocks, 20000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isLoggedIn, wallet.address, wallet.isCircleWallet]);
+}
+
 export default function ArcTestnetDApp() {
   const wallet = useWallet();
   const auth = useAuth(wallet);
@@ -2791,6 +2884,8 @@ export default function ArcTestnetDApp() {
         circleExecuteContract: circleWallet.executeContract,
       }
     : { ...wallet, isCircleWallet: false };
+
+  useNftLockAutoWatch(effectiveWallet, isLoggedIn);
 
   // Show the welcome card exactly once, right after a successful sign-in —
   // never again after that, even across future logins on this browser.
