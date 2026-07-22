@@ -58,7 +58,17 @@ async function withRpcRetry(fn, { retries = 4, baseDelayMs = 1200 } = {}) {
         /request limit reached/i.test(e?.message || "") ||
         /rate limit/i.test(e?.message || "") ||
         e?.code === -32005;
-      if (!isRateLimited || attempt === retries) throw e;
+      // Broader net: App Kit/viem can also surface Arc's flakiness as a
+      // generic connectivity failure rather than an explicit rate-limit
+      // message — e.g. "Network connection failed for Arc Testnet". These
+      // read like hard errors but are the same underlying congested-RPC
+      // problem seen elsewhere in this project, just phrased differently
+      // by whichever layer (viem vs the raw JSON-RPC client) surfaces it.
+      const isConnectivityFailure =
+        /network connection failed/i.test(e?.message || "") ||
+        /timeout/i.test(e?.message || "") ||
+        /econnreset|econnrefused|etimedout/i.test(e?.message || e?.code || "");
+      if ((!isRateLimited && !isConnectivityFailure) || attempt === retries) throw e;
       await new Promise((r) => setTimeout(r, baseDelayMs * (attempt + 1)));
     }
   }
