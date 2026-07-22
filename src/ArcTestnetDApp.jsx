@@ -210,25 +210,35 @@ const CCTP = {
 
 const CCTP_USDC_DECIMALS = 6; // standard ERC-20 USDC on Sepolia, unlike Arc's native 18-decimal USDC
 
-// Chain switching via the already-connected ethers BrowserProvider (its
-// .send() forwards arbitrary RPC methods straight to the underlying
-// wallet), so Bridge doesn't need access to the raw EIP-1193 provider —
-// just the same `provider` every other page already gets from `wallet`.
-async function switchViaProvider(browserProvider, chainConfig) {
+// Chain switching goes straight to window.ethereum, not through an ethers
+// provider instance — ethers v6's BrowserProvider throws "network changed"
+// if you later call getSigner() on an instance that saw a different chain
+// earlier, so Bridge always builds a brand new BrowserProvider right after
+// this resolves rather than reusing one across the switch.
+async function switchViaEthereum(chainConfig) {
+  if (!window.ethereum?.request) {
+    throw new Error("No injected wallet found — Bridge needs MetaMask or a similar browser wallet.");
+  }
   try {
-    await browserProvider.send("wallet_switchEthereumChain", [{ chainId: chainConfig.chainIdHex }]);
+    await window.ethereum.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: chainConfig.chainIdHex }],
+    });
   } catch (switchErr) {
     const code = switchErr?.code ?? switchErr?.error?.code ?? switchErr?.info?.error?.code;
     if (code === 4902) {
-      await browserProvider.send("wallet_addEthereumChain", [
-        {
-          chainId: chainConfig.chainIdHex,
-          chainName: chainConfig.chainName,
-          nativeCurrency: chainConfig.nativeCurrency,
-          rpcUrls: chainConfig.rpcUrls,
-          blockExplorerUrls: chainConfig.blockExplorerUrls,
-        },
-      ]);
+      await window.ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [
+          {
+            chainId: chainConfig.chainIdHex,
+            chainName: chainConfig.chainName,
+            nativeCurrency: chainConfig.nativeCurrency,
+            rpcUrls: chainConfig.rpcUrls,
+            blockExplorerUrls: chainConfig.blockExplorerUrls,
+          },
+        ],
+      });
     } else {
       throw switchErr;
     }
@@ -338,7 +348,12 @@ function useWallet() {
             setQrUri(null);
           }
         }
-        const browserProvider = new ethers.BrowserProvider(raw);
+        // "any" tells ethers not to lock onto the network it saw first and
+        // throw if it later changes — needed because Bridge legitimately
+        // switches the wallet to Sepolia and back mid-flow. Also makes the
+        // app more robust if someone manually switches networks in their
+        // wallet while connected, instead of hard-erroring.
+        const browserProvider = new ethers.BrowserProvider(raw, "any");
         let accounts;
         if (target.kind === "walletconnect") {
           accounts = raw.accounts;
@@ -1946,33 +1961,39 @@ function BridgePage({ wallet }) {
     try {
       setStatus("switching");
       appendLog("Switching wallet to Ethereum Sepolia…");
-      await switchViaProvider(wallet.provider, ETH_SEPOLIA);
-      // A fresh signer, bound to whatever chain the wallet is on right now
-      // that the network switch above just changed.
-      const sepoliaSigner = await wallet.provider.getSigner();
+      await switchViaEthereum(ETH_SEPOLIA);
+      // Deliberately a BRAND NEW BrowserProvider here, not wallet.provider.
+      // Ethers v6 throws "network changed" if you call getSigner() on a
+      // provider instance that was already used on a different chain —
+      // even with staticNetwork left at its default — so every leg of
+      // this flow gets its own fresh instance right after switching.
+      const sepoliaProvider = new ethers.BrowserProvider(window.ethereum);
+      const sepoliaSigner = await sepoliaProvider.getSigner();
 
       setStatus("approving");
       appendLog("Approving USDC for the CCTP TokenMessenger…");
       const usdc = new ethers.Contract(CCTP.ETH_SEPOLIA_USDC, SEPOLIA_USDC_ABI, sepoliaSigner);
       const amountUnits = ethers.parseUnits(amount, CCTP_USDC_DECIMALS);
-      const approveTx = await usdc.approve(CCTP.ETH_SEPOLIA_TOKEN_MESSENGER, amountUnits);
-      await approveTx.wait();
+      const approveTx = await withRpcRetry(() => usdc.approve(CCTP.ETH_SEPOLIA_TOKEN_MESSENGER, amountUnits));
+      await withRpcRetry(() => approveTx.wait());
       appendLog(`Approved — ${approveTx.hash.slice(0, 14)}…`);
 
       setStatus("burning");
       appendLog("Burning USDC on Ethereum Sepolia…");
       const tokenMessenger = new ethers.Contract(CCTP.ETH_SEPOLIA_TOKEN_MESSENGER, TOKEN_MESSENGER_ABI, sepoliaSigner);
       const mintRecipient = ethers.zeroPadValue(wallet.address, 32);
-      const burnTx = await tokenMessenger.depositForBurn(
-        amountUnits,
-        CCTP.ARC_TESTNET_DOMAIN,
-        mintRecipient,
-        CCTP.ETH_SEPOLIA_USDC,
-        ethers.ZeroHash, // destinationCaller — zero allows any address to call receiveMessage
-        500n, // maxFee (0.0005 USDC) — same default as Circle's own quickstart
-        1000 // minFinalityThreshold — 1000 or less selects Fast Transfer
+      const burnTx = await withRpcRetry(() =>
+        tokenMessenger.depositForBurn(
+          amountUnits,
+          CCTP.ARC_TESTNET_DOMAIN,
+          mintRecipient,
+          CCTP.ETH_SEPOLIA_USDC,
+          ethers.ZeroHash, // destinationCaller — zero allows any address to call receiveMessage
+          500n, // maxFee (0.0005 USDC) — same default as Circle's own quickstart
+          1000 // minFinalityThreshold — 1000 or less selects Fast Transfer
+        )
       );
-      await burnTx.wait();
+      await withRpcRetry(() => burnTx.wait());
       appendLog(`Burned — ${burnTx.hash.slice(0, 14)}…`);
 
       setStatus("attesting");
@@ -1998,12 +2019,13 @@ function BridgePage({ wallet }) {
 
       setStatus("minting");
       appendLog("Switching wallet back to Arc Testnet…");
-      await switchViaProvider(wallet.provider, ARC_TESTNET);
-      const arcSigner = await wallet.provider.getSigner();
+      await switchViaEthereum(ARC_TESTNET);
+      const arcProvider = new ethers.BrowserProvider(window.ethereum);
+      const arcSigner = await arcProvider.getSigner();
       const transmitter = new ethers.Contract(CCTP.ARC_TESTNET_MESSAGE_TRANSMITTER, MESSAGE_TRANSMITTER_ABI, arcSigner);
       appendLog("Minting USDC on Arc Testnet…");
-      const mintTx = await transmitter.receiveMessage(attestation.message, attestation.attestation);
-      await mintTx.wait();
+      const mintTx = await withRpcRetry(() => transmitter.receiveMessage(attestation.message, attestation.attestation));
+      await withRpcRetry(() => mintTx.wait());
       appendLog(`Minted — ${mintTx.hash.slice(0, 14)}…`);
 
       setStatus("done");
