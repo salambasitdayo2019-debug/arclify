@@ -1067,17 +1067,40 @@ function CopyButton({ value, className = "" }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
 /*  Toast notifications — a tiny global pub/sub, no context needed      */
 /*  since pages here just receive `wallet` as a prop rather than        */
 /*  reading from a provider. `toast(...)` can be called from anywhere;  */
 /*  <ToastViewport/> (mounted once in the App shell) renders them.      */
+/*                                                                      */
+/*  Every toast with a `category` and a real outcome (tone "ok" or      */
+/*  "bad" — not "neutral"/"warn" status-only messages) also gets        */
+/*  written to a persistent Activity log, so it's still visible after   */
+/*  the toast itself disappears. One system, two audiences: the toast   */
+/*  is the in-the-moment nudge, the Activity page is the searchable     */
+/*  record of everything that's happened.                               */
 /* ------------------------------------------------------------------ */
 
+const ACTIVITY_LOG_KEY = "arc_activity_log";
+const ACTIVITY_LOG_MAX_ENTRIES = 200;
+let activityListeners = [];
+
+function logActivity(entry) {
+  const log = readLS(ACTIVITY_LOG_KEY, []);
+  const next = [entry, ...log].slice(0, ACTIVITY_LOG_MAX_ENTRIES);
+  writeLS(ACTIVITY_LOG_KEY, next);
+  activityListeners.forEach((fn) => fn(entry));
+}
+
 let toastListeners = [];
-function toast({ tone = "neutral", title, message, action }) {
+function toast({ tone = "neutral", title, message, action, category }) {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const entry = { id, tone, title, message, action };
   toastListeners.forEach((fn) => fn(entry));
+
+  if (category && (tone === "ok" || tone === "bad")) {
+    logActivity({ id, category, tone, title, message, timestamp: Date.now() });
+  }
   return id;
 }
 
@@ -1281,10 +1304,10 @@ function CommandBar({ wallet, onNavigate }) {
           const contract = new ethers.Contract(CONTRACTS[parsed.token], ERC20_ABI, signer);
           tx = await contract.transfer(parsed.to, ethers.parseUnits(parsed.amount, TOKEN_DECIMALS[parsed.token]));
         }
-        toast({ tone: "warn", title: "Transaction submitted", message: `${tx.hash.slice(0, 18)}…` });
+        toast({ category: "Command", tone: "warn", title: "Transaction submitted", message: `${tx.hash.slice(0, 18)}…` });
         await tx.wait();
         pushTx({ type: "Transfer", token: parsed.token, to: parsed.to, amount: parsed.amount, txHash: tx.hash, status: "confirmed" });
-        toast({ tone: "ok", title: "Command complete", message: describeCommand(parsed) });
+        toast({ category: "Command", tone: "ok", title: "Command complete", message: describeCommand(parsed) });
       } else if (parsed.action === "bulkSend") {
         const signer = await wallet.provider.getSigner();
         const isNative = parsed.token === NATIVE_TOKEN_SYMBOL;
@@ -1304,7 +1327,7 @@ function CommandBar({ wallet, onNavigate }) {
           }
         }
         writeLS(LS_KEYS.bulk, [{ id: crypto.randomUUID(), token: parsed.token, rows: parsed.addresses.map((to) => ({ to, amount: parsed.amount })), timestamp: Date.now() }, ...readLS(LS_KEYS.bulk, [])]);
-        toast({
+        toast({ category: "Command",
           tone: failed === 0 ? "ok" : succeeded === 0 ? "bad" : "warn",
           title: "Bulk send complete",
           message: `${succeeded} succeeded, ${failed} failed.`,
@@ -1325,7 +1348,7 @@ function CommandBar({ wallet, onNavigate }) {
         if (!res.ok) throw new Error((await res.json()).error || "Swap failed");
         const data = await res.json();
         pushTx({ type: "Swap", tokenIn: parsed.tokenIn, tokenOut: parsed.tokenOut, amountIn: parsed.amount, estimatedOutput: data.estimatedOutput, status: data.status || "submitted" });
-        toast({ tone: "ok", title: "Command complete", message: describeCommand(parsed) });
+        toast({ category: "Command", tone: "ok", title: "Command complete", message: describeCommand(parsed) });
       } else if (parsed.action === "mintNft") {
         const signer = await wallet.provider.getSigner();
         const nft = new ethers.Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, signer);
@@ -1336,7 +1359,7 @@ function CommandBar({ wallet, onNavigate }) {
           .find((p) => p?.name === "Transfer");
         const newTokenId = transferEvent?.args?.tokenId?.toString();
         writeLS(LS_MINTED_KEY, [newTokenId, ...readLS(LS_MINTED_KEY, [])]);
-        toast({ tone: "ok", title: "NFT minted", message: `Token #${newTokenId}` });
+        toast({ category: "Command", tone: "ok", title: "NFT minted", message: `Token #${newTokenId}` });
       } else if (parsed.action === "lockNft") {
         const signer = await wallet.provider.getSigner();
         const nft = new ethers.Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, signer);
@@ -1352,19 +1375,19 @@ function CommandBar({ wallet, onNavigate }) {
         const newLockId = lockedEvent?.args?.lockId?.toString();
         writeLS(LS_LOCK_IDS_KEY, [newLockId, ...readLS(LS_LOCK_IDS_KEY, [])]);
         writeLS(LS_MINTED_KEY, readLS(LS_MINTED_KEY, []).filter((id) => id !== parsed.tokenId));
-        toast({ tone: "ok", title: "NFT locked", message: describeCommand(parsed) });
+        toast({ category: "Command", tone: "ok", title: "NFT locked", message: describeCommand(parsed) });
       } else if (parsed.action === "withdrawLock") {
         const signer = await wallet.provider.getSigner();
         const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, signer);
         const tx = await withRpcRetry(() => vault.withdraw(parsed.lockId));
         await withRpcRetry(() => tx.wait());
-        toast({ tone: "ok", title: "Withdrawn", message: describeCommand(parsed) });
+        toast({ category: "Command", tone: "ok", title: "Withdrawn", message: describeCommand(parsed) });
       }
       reset();
     } catch (e) {
       const msg = e.shortMessage || e.message || "Command failed.";
       setError(msg);
-      toast({ tone: "bad", title: "Command failed", message: msg });
+      toast({ category: "Command", tone: "bad", title: "Command failed", message: msg });
     } finally {
       setRunning(false);
     }
@@ -1456,6 +1479,7 @@ const NAV_ITEMS = [
   "Bridge",
   "Lending",
   "NFT Lock",
+  "Activity",
   "History",
   "Leaderboard",
   "Wallet Profile",
@@ -1656,11 +1680,11 @@ function TransferPage({ wallet }) {
 
   const handleSend = useCallback(async () => {
     if (!wallet.address) {
-      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      toast({ category: "Transfer", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     if (!ethers.isAddress(to) || !amount) {
-      toast({ tone: "bad", title: "Invalid input", message: "Enter a valid address and amount." });
+      toast({ category: "Transfer", tone: "bad", title: "Invalid input", message: "Enter a valid address and amount." });
       return;
     }
 
@@ -1671,11 +1695,11 @@ function TransferPage({ wallet }) {
         // ERC-20 contracts so we pass their address through.
         const tokenAddress = token === NATIVE_TOKEN_SYMBOL ? undefined : CONTRACTS[token];
         await wallet.circleSendTransfer({ to, amount, tokenAddress });
-        toast({ tone: "ok", title: "Transfer confirmed", message: `${amount} ${token} sent successfully.` });
+        toast({ category: "Transfer", tone: "ok", title: "Transfer confirmed", message: `${amount} ${token} sent successfully.` });
         setTo("");
         setAmount("");
       } catch (e) {
-        toast({ tone: "bad", title: "Transfer failed", message: e.message });
+        toast({ category: "Transfer", tone: "bad", title: "Transfer failed", message: e.message });
       } finally {
         setSending(false);
       }
@@ -1683,7 +1707,7 @@ function TransferPage({ wallet }) {
     }
 
     if (!wallet.provider) {
-      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      toast({ category: "Transfer", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     setSending(true);
@@ -1700,14 +1724,14 @@ function TransferPage({ wallet }) {
         const decimals = TOKEN_DECIMALS[token];
         tx = await contract.transfer(to, ethers.parseUnits(amount, decimals));
       }
-      toast({ tone: "warn", title: "Transaction submitted", message: `${tx.hash.slice(0, 18)}…` });
+      toast({ category: "Transfer", tone: "warn", title: "Transaction submitted", message: `${tx.hash.slice(0, 18)}…` });
       await tx.wait();
       pushTx({ type: "Transfer", token, to, amount, txHash: tx.hash, status: "confirmed" });
-      toast({ tone: "ok", title: "Transfer confirmed", message: `${amount} ${token} sent successfully.` });
+      toast({ category: "Transfer", tone: "ok", title: "Transfer confirmed", message: `${amount} ${token} sent successfully.` });
       setTo("");
       setAmount("");
     } catch (e) {
-      toast({ tone: "bad", title: "Transfer failed", message: e.shortMessage || e.message });
+      toast({ category: "Transfer", tone: "bad", title: "Transfer failed", message: e.shortMessage || e.message });
     } finally {
       setSending(false);
     }
@@ -1767,7 +1791,7 @@ function BulkTransferPage({ wallet }) {
 
   const runBatch = useCallback(async () => {
     if (!wallet.provider) {
-      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      toast({ category: "Bulk Transfer", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     const signer = await wallet.provider.getSigner();
@@ -1793,7 +1817,7 @@ function BulkTransferPage({ wallet }) {
     }
     writeLS(LS_KEYS.bulk, [{ id: crypto.randomUUID(), token, rows, timestamp: Date.now() }, ...readLS(LS_KEYS.bulk, [])]);
     setLog(results);
-    toast({
+    toast({ category: "Bulk Transfer",
       tone: failed === 0 ? "ok" : succeeded === 0 ? "bad" : "warn",
       title: "Batch complete",
       message: `${succeeded} succeeded, ${failed} failed.`,
@@ -1916,7 +1940,7 @@ function SwapPage({ wallet }) {
   const handleSwap = useCallback(async () => {
     if (!wallet.address) {
       setErrorMsg("Connect your wallet first.");
-      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      toast({ category: "Swap", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     setBusy(true);
@@ -1945,14 +1969,14 @@ function SwapPage({ wallet }) {
         estimatedOutput: data.estimatedOutput,
         status: data.status || "submitted",
       });
-      toast({
+      toast({ category: "Swap",
         tone: "ok",
         title: "Swap submitted",
         message: `${amountIn} ${tokenIn} → ${tokenOut}`,
       });
     } catch (e) {
       setErrorMsg(e.message);
-      toast({ tone: "bad", title: "Swap failed", message: e.message });
+      toast({ category: "Swap", tone: "bad", title: "Swap failed", message: e.message });
     } finally {
       setBusy(false);
     }
@@ -2076,11 +2100,11 @@ function BridgePage({ wallet }) {
 
   const runBridge = useCallback(async () => {
     if (!wallet.provider || !wallet.address) {
-      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      toast({ category: "Bridge", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     if (!amount || Number(amount) <= 0) {
-      toast({ tone: "bad", title: "Invalid amount", message: "Enter an amount to bridge." });
+      toast({ category: "Bridge", tone: "bad", title: "Invalid amount", message: "Enter an amount to bridge." });
       return;
     }
     setError(null);
@@ -2185,11 +2209,11 @@ function BridgePage({ wallet }) {
       appendLog(`Minted — ${mintTx.hash.slice(0, 14)}…`);
 
       setStatus("done");
-      toast({ tone: "ok", title: "Bridge complete", message: `${amount} USDC arrived on Arc Testnet.` });
+      toast({ category: "Bridge", tone: "ok", title: "Bridge complete", message: `${amount} USDC arrived on Arc Testnet.` });
     } catch (e) {
       setError(e.shortMessage || e.message);
       setStatus("error");
-      toast({ tone: "bad", title: "Bridge failed", message: e.shortMessage || e.message });
+      toast({ category: "Bridge", tone: "bad", title: "Bridge failed", message: e.shortMessage || e.message });
     }
   }, [wallet, amount, source]);
 
@@ -2318,7 +2342,7 @@ function LendingPage({ wallet }) {
 
   const handleDeposit = useCallback(async () => {
     if (!wallet.address) {
-      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      toast({ category: "Lending", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     if (!depositAmount || Number(depositAmount) <= 0) return;
@@ -2331,11 +2355,11 @@ function LendingPage({ wallet }) {
         functionSignature: "depositCollateral(uint256)",
         functionParams: [amountUnits],
       });
-      toast({ tone: "ok", title: "Collateral deposited", message: `${depositAmount} USDC added.` });
+      toast({ category: "Lending", tone: "ok", title: "Collateral deposited", message: `${depositAmount} USDC added.` });
       setDepositAmount("");
       refresh();
     } catch (e) {
-      toast({ tone: "bad", title: "Deposit failed", message: e.shortMessage || e.message });
+      toast({ category: "Lending", tone: "bad", title: "Deposit failed", message: e.shortMessage || e.message });
     } finally {
       setBusy(false);
     }
@@ -2350,11 +2374,11 @@ function LendingPage({ wallet }) {
         functionSignature: "withdrawCollateral(uint256)",
         functionParams: [amountUnits],
       });
-      toast({ tone: "ok", title: "Collateral withdrawn", message: `${withdrawAmount} USDC returned.` });
+      toast({ category: "Lending", tone: "ok", title: "Collateral withdrawn", message: `${withdrawAmount} USDC returned.` });
       setWithdrawAmount("");
       refresh();
     } catch (e) {
-      toast({ tone: "bad", title: "Withdraw failed", message: e.shortMessage || e.message });
+      toast({ category: "Lending", tone: "bad", title: "Withdraw failed", message: e.shortMessage || e.message });
     } finally {
       setBusy(false);
     }
@@ -2369,11 +2393,11 @@ function LendingPage({ wallet }) {
         functionSignature: "borrow(uint256)",
         functionParams: [amountUnits],
       });
-      toast({ tone: "ok", title: "Borrowed", message: `${borrowAmount} EURC sent to your wallet.` });
+      toast({ category: "Lending", tone: "ok", title: "Borrowed", message: `${borrowAmount} EURC sent to your wallet.` });
       setBorrowAmount("");
       refresh();
     } catch (e) {
-      toast({ tone: "bad", title: "Borrow failed", message: e.shortMessage || e.message });
+      toast({ category: "Lending", tone: "bad", title: "Borrow failed", message: e.shortMessage || e.message });
     } finally {
       setBusy(false);
     }
@@ -2390,11 +2414,11 @@ function LendingPage({ wallet }) {
         functionSignature: "repay(uint256)",
         functionParams: [amountUnits],
       });
-      toast({ tone: "ok", title: "Repaid", message: `${repayAmount} EURC repaid.` });
+      toast({ category: "Lending", tone: "ok", title: "Repaid", message: `${repayAmount} EURC repaid.` });
       setRepayAmount("");
       refresh();
     } catch (e) {
-      toast({ tone: "bad", title: "Repay failed", message: e.shortMessage || e.message });
+      toast({ category: "Lending", tone: "bad", title: "Repay failed", message: e.shortMessage || e.message });
     } finally {
       setBusy(false);
     }
@@ -2411,11 +2435,11 @@ function LendingPage({ wallet }) {
         functionSignature: "fundPool(uint256)",
         functionParams: [amountUnits],
       });
-      toast({ tone: "ok", title: "Pool funded", message: `${fundAmount} EURC added to available liquidity.` });
+      toast({ category: "Lending", tone: "ok", title: "Pool funded", message: `${fundAmount} EURC added to available liquidity.` });
       setFundAmount("");
       refresh();
     } catch (e) {
-      toast({ tone: "bad", title: "Fund pool failed", message: e.shortMessage || e.message });
+      toast({ category: "Lending", tone: "bad", title: "Fund pool failed", message: e.shortMessage || e.message });
     } finally {
       setBusy(false);
     }
@@ -2599,7 +2623,7 @@ function NFTLockPage({ wallet }) {
 
   const mintNft = useCallback(async () => {
     if (!wallet.address) {
-      toast({ tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      toast({ category: "NFT Lock", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     setBusy(true);
@@ -2627,9 +2651,9 @@ function NFTLockPage({ wallet }) {
       const next = [newTokenId, ...mintedIds];
       setMintedIds(next);
       writeLS(LS_MINTED_KEY, next);
-      toast({ tone: "ok", title: "NFT minted", message: `Token #${newTokenId}` });
+      toast({ category: "NFT Lock", tone: "ok", title: "NFT minted", message: `Token #${newTokenId}` });
     } catch (e) {
-      toast({ tone: "bad", title: "Mint failed", message: e.shortMessage || e.message });
+      toast({ category: "NFT Lock", tone: "bad", title: "Mint failed", message: e.shortMessage || e.message });
     } finally {
       setBusy(false);
     }
@@ -2681,7 +2705,7 @@ function NFTLockPage({ wallet }) {
       setMintedIds(nextMinted);
       writeLS(LS_MINTED_KEY, nextMinted);
 
-      toast({
+      toast({ category: "NFT Lock",
         tone: "ok",
         title: "NFT locked",
         message:
@@ -2690,7 +2714,7 @@ function NFTLockPage({ wallet }) {
             : `Token #${tokenId} locked for ${duration} day(s).`,
       });
     } catch (e) {
-      toast({ tone: "bad", title: "Lock failed", message: e.shortMessage || e.message });
+      toast({ category: "NFT Lock", tone: "bad", title: "Lock failed", message: e.shortMessage || e.message });
     } finally {
       setBusy(false);
     }
@@ -2700,10 +2724,10 @@ function NFTLockPage({ wallet }) {
     setBusy(true);
     try {
       await performLockWithdraw(wallet, lockId);
-      toast({ tone: "ok", title: "Withdrawn", message: `Lock #${lockId} withdrawn.` });
+      toast({ category: "NFT Lock", tone: "ok", title: "Withdrawn", message: `Lock #${lockId} withdrawn.` });
       setLockDetails((prev) => ({ ...prev, [lockId]: { ...prev[lockId], withdrawn: true } }));
     } catch (e) {
-      toast({ tone: "bad", title: "Withdraw failed", message: e.shortMessage || e.message });
+      toast({ category: "NFT Lock", tone: "bad", title: "Withdraw failed", message: e.shortMessage || e.message });
     } finally {
       setBusy(false);
     }
@@ -2777,6 +2801,106 @@ function NFTLockPage({ wallet }) {
               );
             })}
           </div>
+        </div>
+      )}
+    </GlassCard>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Page: Activity Centre — every real outcome the app has toasted      */
+/*  about (transfers, swaps, bridges, lending, NFT lock, commands),     */
+/*  persisted so it's still visible after the toast itself disappears.  */
+/*  This is app-level activity (what YOU did in this browser), not the  */
+/*  on-chain event history that History/Leaderboard pull — those two    */
+/*  stay separate and serve different questions.                        */
+/* ------------------------------------------------------------------ */
+
+const ACTIVITY_CATEGORIES = ["All", "Transfer", "Bulk Transfer", "Swap", "Bridge", "Lending", "NFT Lock", "Command"];
+
+function relativeTime(timestamp) {
+  const seconds = Math.floor((Date.now() - timestamp) / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function ActivityPage() {
+  const [entries, setEntries] = useState(() => readLS(ACTIVITY_LOG_KEY, []));
+  const [filter, setFilter] = useState("All");
+
+  useEffect(() => {
+    const onActivity = () => setEntries(readLS(ACTIVITY_LOG_KEY, []));
+    activityListeners.push(onActivity);
+    return () => {
+      activityListeners = activityListeners.filter((fn) => fn !== onActivity);
+    };
+  }, []);
+
+  const filtered = filter === "All" ? entries : entries.filter((e) => e.category === filter);
+
+  const clearLog = () => {
+    writeLS(ACTIVITY_LOG_KEY, []);
+    setEntries([]);
+  };
+
+  return (
+    <GlassCard className="p-6 max-w-2xl">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-white text-lg font-semibold">Activity Centre</h2>
+        {entries.length > 0 && (
+          <button onClick={clearLog} className="text-white/40 hover:text-white/70 text-xs transition">
+            Clear log
+          </button>
+        )}
+      </div>
+      <p className="text-white/40 text-xs mb-4">
+        Everything that's happened in this browser — transfers, swaps, bridges, lending, NFT lock actions. Kept locally, most recent first.
+      </p>
+
+      <div className="flex flex-wrap gap-2 mb-5">
+        {ACTIVITY_CATEGORIES.map((cat) => (
+          <button
+            key={cat}
+            onClick={() => setFilter(cat)}
+            className={`text-xs px-3 py-1.5 rounded-full border transition ${
+              filter === cat
+                ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200"
+                : "bg-white/5 border-white/10 text-white/50 hover:text-white/80"
+            }`}
+          >
+            {cat}
+          </button>
+        ))}
+      </div>
+
+      {filtered.length === 0 ? (
+        <p className="text-white/30 text-sm py-8 text-center">
+          {entries.length === 0 ? "Nothing here yet — actions you take across the app will show up here." : "Nothing in this category yet."}
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map((entry) => (
+            <div key={entry.id} className="flex items-start justify-between gap-3 bg-white/5 rounded-lg px-4 py-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                      entry.tone === "ok" ? "bg-emerald-400" : "bg-rose-400"
+                    }`}
+                  />
+                  <span className="text-white text-sm font-medium truncate">{entry.title}</span>
+                  <span className="text-white/30 text-[10px] uppercase tracking-wide shrink-0">{entry.category}</span>
+                </div>
+                {entry.message && <p className="text-white/50 text-xs break-all">{entry.message}</p>}
+              </div>
+              <span className="text-white/30 text-xs shrink-0">{relativeTime(entry.timestamp)}</span>
+            </div>
+          ))}
         </div>
       )}
     </GlassCard>
@@ -3313,9 +3437,9 @@ function useNftLockAutoWatch(wallet, isLoggedIn) {
                 withdrawingRef.current.add(id);
                 try {
                   await performLockWithdraw(walletRef.current, id);
-                  toast({ tone: "ok", title: "Withdrawn", message: `Lock #${id} withdrawn.` });
+                  toast({ category: "NFT Lock", tone: "ok", title: "Withdrawn", message: `Lock #${id} withdrawn.` });
                 } catch (e) {
-                  toast({ tone: "bad", title: "Withdraw failed", message: e.shortMessage || e.message });
+                  toast({ category: "NFT Lock", tone: "bad", title: "Withdraw failed", message: e.shortMessage || e.message });
                 } finally {
                   withdrawingRef.current.delete(id);
                 }
@@ -3394,6 +3518,7 @@ export default function ArcTestnetDApp() {
       case "Bridge": return <BridgePage wallet={effectiveWallet} />;
       case "Lending": return <LendingPage wallet={effectiveWallet} />;
       case "NFT Lock": return <NFTLockPage wallet={effectiveWallet} />;
+      case "Activity": return <ActivityPage />;
       case "History": return <HistoryPage wallet={effectiveWallet} />;
       case "Leaderboard": return <LeaderboardPage wallet={effectiveWallet} />;
       case "Wallet Profile": return <WalletProfilePage wallet={effectiveWallet} />;
