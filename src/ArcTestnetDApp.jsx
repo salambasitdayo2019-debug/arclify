@@ -139,8 +139,8 @@ async function performLockWithdraw(wallet, lockId) {
   } else {
     const signer = await wallet.provider.getSigner();
     const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, signer);
-    const tx = await vault.withdraw(lockId);
-    await tx.wait();
+    const tx = await withRpcRetry(() => vault.withdraw(lockId));
+    await withRpcRetry(() => tx.wait());
   }
 }
 
@@ -1190,8 +1190,8 @@ function CommandBar({ wallet, onNavigate }) {
       } else if (parsed.action === "mintNft") {
         const signer = await wallet.provider.getSigner();
         const nft = new ethers.Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, signer);
-        const tx = await nft.mint();
-        const receipt = await tx.wait();
+        const tx = await withRpcRetry(() => nft.mint());
+        const receipt = await withRpcRetry(() => tx.wait());
         const transferEvent = receipt.logs
           .map((log) => { try { return nft.interface.parseLog(log); } catch { return null; } })
           .find((p) => p?.name === "Transfer");
@@ -1202,11 +1202,11 @@ function CommandBar({ wallet, onNavigate }) {
         const signer = await wallet.provider.getSigner();
         const nft = new ethers.Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, signer);
         const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, signer);
-        const approveTx = await nft.approve(NFT_LOCK_VAULT_ADDRESS, parsed.tokenId);
-        await approveTx.wait();
+        const approveTx = await withRpcRetry(() => nft.approve(NFT_LOCK_VAULT_ADDRESS, parsed.tokenId));
+        await withRpcRetry(() => approveTx.wait());
         const unlockAt = Math.floor(Date.now() / 1000) + Number(parsed.days) * 86400;
-        const lockTx = await vault.lock(NFT_CONTRACT_ADDRESS, parsed.tokenId, unlockAt);
-        const receipt = await lockTx.wait();
+        const lockTx = await withRpcRetry(() => vault.lock(NFT_CONTRACT_ADDRESS, parsed.tokenId, unlockAt));
+        const receipt = await withRpcRetry(() => lockTx.wait());
         const lockedEvent = receipt.logs
           .map((log) => { try { return vault.interface.parseLog(log); } catch { return null; } })
           .find((p) => p?.name === "Locked");
@@ -1217,8 +1217,8 @@ function CommandBar({ wallet, onNavigate }) {
       } else if (parsed.action === "withdrawLock") {
         const signer = await wallet.provider.getSigner();
         const vault = new ethers.Contract(NFT_LOCK_VAULT_ADDRESS, NFT_LOCK_ABI, signer);
-        const tx = await vault.withdraw(parsed.lockId);
-        await tx.wait();
+        const tx = await withRpcRetry(() => vault.withdraw(parsed.lockId));
+        await withRpcRetry(() => tx.wait());
         toast({ tone: "ok", title: "Withdrawn", message: describeCommand(parsed) });
       }
       reset();
@@ -2105,7 +2105,7 @@ function NFTLockPage({ wallet }) {
       const entries = await Promise.all(
         lockIds.map(async (id) => {
           try {
-            const l = await vault.getLock(id);
+            const l = await withRpcRetry(() => vault.getLock(id));
             return [id, {
               tokenId: l.tokenId.toString(),
               unlockAt: Number(l.unlockAt) * 1000,
@@ -2139,11 +2139,11 @@ function NFTLockPage({ wallet }) {
           abiFunctionSignature: "mint()",
           abiParameters: [],
         });
-        receipt = await readOnlyProvider.getTransactionReceipt(txHash);
+        receipt = await withRpcRetry(() => readOnlyProvider.getTransactionReceipt(txHash));
       } else {
         const { nft } = await getContracts();
-        const tx = await nft.mint();
-        receipt = await tx.wait();
+        const tx = await withRpcRetry(() => nft.mint());
+        receipt = await withRpcRetry(() => tx.wait());
       }
       const transferEvent = receipt.logs
         .map((log) => { try { return nftInterface.parseLog(log); } catch { return null; } })
@@ -2185,13 +2185,13 @@ function NFTLockPage({ wallet }) {
           abiFunctionSignature: "lock(address,uint256,uint256)",
           abiParameters: [NFT_CONTRACT_ADDRESS, String(tokenId), String(unlockAt)],
         });
-        receipt = await readOnlyProvider.getTransactionReceipt(lockTxHash);
+        receipt = await withRpcRetry(() => readOnlyProvider.getTransactionReceipt(lockTxHash));
       } else {
         const { nft, vault } = await getContracts();
-        const approveTx = await nft.approve(NFT_LOCK_VAULT_ADDRESS, tokenId);
-        await approveTx.wait();
-        const lockTx = await vault.lock(NFT_CONTRACT_ADDRESS, tokenId, unlockAt);
-        receipt = await lockTx.wait();
+        const approveTx = await withRpcRetry(() => nft.approve(NFT_LOCK_VAULT_ADDRESS, tokenId));
+        await withRpcRetry(() => approveTx.wait());
+        const lockTx = await withRpcRetry(() => vault.lock(NFT_CONTRACT_ADDRESS, tokenId, unlockAt));
+        receipt = await withRpcRetry(() => lockTx.wait());
       }
       const lockedEvent = receipt.logs
         .map((log) => { try { return vaultInterface.parseLog(log); } catch { return null; } })
@@ -2819,7 +2819,7 @@ function useNftLockAutoWatch(wallet, isLoggedIn) {
         if (cancelled) return;
         if (notifiedRef.current.has(id)) continue;
         try {
-          const l = await vault.getLock(id);
+          const l = await withRpcRetry(() => vault.getLock(id));
           if (l.withdrawn) {
             notifiedRef.current.add(id); // already handled, nothing to notify about
             continue;
