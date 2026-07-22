@@ -72,7 +72,16 @@ async function withRpcRetry(fn, { retries = 5, baseDelayMs = 900 } = {}) {
         e?.error?.code === -32005 ||
         /rate limit/i.test(e?.message || "") ||
         /rate limit/i.test(e?.error?.message || "");
-      if (!isRateLimited || attempt === retries) throw e;
+      // A genuine contract revert always carries either a reason string
+      // or revert data. When BOTH come back null on a call to a plain
+      // getter with no require()/revert() in it at all (like a public
+      // state variable), that's not a real revert — it's Arc's RPC
+      // returning a garbled response under load, which ethers can only
+      // report as a generic CALL_EXCEPTION since it has nothing else to
+      // go on. Worth retrying rather than trusting it as a real failure.
+      const isGarbledCallException =
+        e?.code === "CALL_EXCEPTION" && e?.data == null && e?.reason == null;
+      if ((!isRateLimited && !isGarbledCallException) || attempt === retries) throw e;
       await new Promise((r) => setTimeout(r, baseDelayMs * (attempt + 1)));
     }
   }
@@ -2256,6 +2265,7 @@ function BridgePage({ wallet }) {
 function LendingPage({ wallet }) {
   const [account, setAccount] = useState(null); // { collateral, debt, maxBorrowable, liquidatable, availableLiquidity }
   const [poolInfo, setPoolInfo] = useState(null); // { exchangeRate, collateralFactorBps, liquidationThresholdBps, interestRateBps }
+  const [loadError, setLoadError] = useState(null);
   const [depositAmount, setDepositAmount] = useState("");
   const [withdrawAmount, setWithdrawAmount] = useState("");
   const [borrowAmount, setBorrowAmount] = useState("");
@@ -2293,8 +2303,10 @@ function LendingPage({ wallet }) {
         liquidationThresholdBps: Number(lt),
         interestRateBps: Number(ir),
       });
+      setLoadError(null);
     } catch (e) {
       console.warn("Failed to load lending account data:", e);
+      setLoadError(e.shortMessage || e.message || "Failed to load account data.");
     }
   }, [wallet.provider, wallet.address, refreshKey]);
 
@@ -2418,6 +2430,18 @@ function LendingPage({ wallet }) {
         a production money market. Contract:{" "}
         <span className="font-mono">{LENDING_POOL_ADDRESS.slice(0, 10)}…</span>
       </p>
+
+      {loadError && !account && (
+        <div className="mb-5 text-xs text-rose-300 bg-rose-950/40 border border-rose-500/30 rounded-lg p-3">
+          <p className="mb-2">Couldn't load your position: {loadError}</p>
+          <button
+            onClick={() => setRefreshKey((k) => k + 1)}
+            className="text-cyan-300 hover:text-cyan-200 font-medium"
+          >
+            Retry →
+          </button>
+        </div>
+      )}
 
       {account && (
         <div className="grid grid-cols-2 gap-3 mb-5 text-sm">
