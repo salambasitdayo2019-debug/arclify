@@ -1978,6 +1978,35 @@ function BridgePage({ wallet }) {
       await withRpcRetry(() => approveTx.wait());
       appendLog(`Approved — ${approveTx.hash.slice(0, 14)}…`);
 
+      // Circle explicitly warns against hardcoding this: maxFee has to be
+      // fetched fresh, since a value that's high enough today can quietly
+      // fall below Circle's current minimum tomorrow. When that happens
+      // the burn doesn't fail — it just silently downgrades from Fast
+      // Transfer (~30s) to Standard Transfer (waits for full source-chain
+      // finality, which is what happened the first time this ran with a
+      // hardcoded fee).
+      appendLog("Checking the current Fast Transfer fee…");
+      let maxFee = 500n; // fallback only if the fee lookup itself fails
+      try {
+        const feeRes = await fetch(`${API_BASE}/bridge/fee?sourceDomain=${CCTP.ETH_SEPOLIA_DOMAIN}&destDomain=${CCTP.ARC_TESTNET_DOMAIN}`);
+        if (feeRes.ok) {
+          const fees = await feeRes.json();
+          const minimumFeeBps = fees?.[0]?.minimumFee;
+          if (typeof minimumFeeBps === "number") {
+            // Circle's own formula: fee = amount * (bps / 10,000), scaled
+            // by 100 first (via Math.round) to tolerate fractional bps
+            // without floating-point error, then a 20% buffer on top so a
+            // small fee increase between this quote and the burn landing
+            // on-chain doesn't push it back under the threshold again.
+            const protocolFee = (amountUnits * BigInt(Math.round(minimumFeeBps * 100))) / 1_000_000n;
+            maxFee = (protocolFee * 120n) / 100n;
+          }
+        }
+      } catch {
+        // Network hiccup on the fee lookup — fall back to the flat default
+        // above rather than blocking the whole bridge attempt on it.
+      }
+
       setStatus("burning");
       appendLog("Burning USDC on Ethereum Sepolia…");
       const tokenMessenger = new ethers.Contract(CCTP.ETH_SEPOLIA_TOKEN_MESSENGER, TOKEN_MESSENGER_ABI, sepoliaSigner);
@@ -1989,7 +2018,7 @@ function BridgePage({ wallet }) {
           mintRecipient,
           CCTP.ETH_SEPOLIA_USDC,
           ethers.ZeroHash, // destinationCaller — zero allows any address to call receiveMessage
-          500n, // maxFee (0.0005 USDC) — same default as Circle's own quickstart
+          maxFee,
           1000 // minFinalityThreshold — 1000 or less selects Fast Transfer
         )
       );
