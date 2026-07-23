@@ -292,6 +292,7 @@ const BRIDGE_SOURCE_CHAINS = {
     label: "Ethereum Sepolia",
     domain: 0,
     usdc: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+    circleBlockchain: "ETH-SEPOLIA",
     chain: {
       chainIdHex: "0xaa36a7", // 11155111
       chainId: 11155111,
@@ -305,6 +306,7 @@ const BRIDGE_SOURCE_CHAINS = {
     label: "Base Sepolia",
     domain: 6,
     usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    circleBlockchain: "BASE-SEPOLIA",
     chain: {
       chainIdHex: "0x14a34", // 84532
       chainId: 84532,
@@ -318,6 +320,7 @@ const BRIDGE_SOURCE_CHAINS = {
     label: "Avalanche Fuji",
     domain: 1,
     usdc: "0x5425890298aed601595a70AB815c96711a31Bc65",
+    circleBlockchain: "AVAX-FUJI",
     chain: {
       chainIdHex: "0xa869", // 43113
       chainId: 43113,
@@ -674,6 +677,7 @@ function useCircleWallet() {
   const [error, setError] = useState(null);
   const [address, setAddress] = useState(null);
   const [walletId, setWalletId] = useState(null);
+  const [walletsByChain, setWalletsByChain] = useState({});
   const [createDate, setCreateDate] = useState(null);
   const [balance, setBalance] = useState(null);
   const [balances, setBalances] = useState({ USDC: "0", EURC: "0", cirBTC: "0" });
@@ -720,7 +724,12 @@ function useCircleWallet() {
     const walletsRes = await fetch(`${API_BASE}/circle/wallets?userToken=${encodeURIComponent(userToken)}`);
     if (!walletsRes.ok) throw new Error("Could not load wallet.");
     const { wallets } = await walletsRes.json();
-    const primary = wallets?.[0];
+    // Now that a user can hold wallets on more than just Arc (see Bridge),
+    // index [0] is no longer a safe way to find "the Arc wallet" — has to
+    // be found explicitly by blockchain.
+    const byChain = Object.fromEntries((wallets || []).map((w) => [w.blockchain, w]));
+    setWalletsByChain(byChain);
+    const primary = byChain["ARC-TESTNET"];
     if (!primary) return null;
     setAddress(primary.address);
     setWalletId(primary.id);
@@ -745,6 +754,44 @@ function useCircleWallet() {
     }
     return primary;
   }, []);
+
+  // Provisions a wallet for this same Circle user on an ADDITIONAL
+  // blockchain (e.g. ETH-SEPOLIA for Bridge) — same challenge->PIN
+  // pattern as everything else, then refreshes the wallet list so the
+  // newly created wallet shows up in walletsByChain.
+  const createWalletOnChain = useCallback(async (blockchain) => {
+    if (!sessionRef.current) throw new Error("Not signed in with a Circle wallet.");
+    const { userToken, encryptionKey } = sessionRef.current;
+
+    const res = await fetch(`${API_BASE}/circle/create-wallet`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userToken, blockchain }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || body.message || "Could not create wallet.");
+    }
+    const { challengeId } = await res.json();
+
+    const sdk = getSdk();
+    if (!deviceIdRef.current) {
+      deviceIdRef.current = await sdk.getDeviceId();
+    }
+    sdk.setAuthentication({ userToken, encryptionKey });
+
+    await new Promise((resolve, reject) => {
+      sdk.execute(challengeId, (err) => {
+        if (err) {
+          reject(new Error(err?.message || "Wallet setup was cancelled or failed."));
+          return;
+        }
+        resolve();
+      });
+    });
+
+    await loadWalletAndBalance(userToken);
+  }, [getSdk, loadWalletAndBalance]);
 
   // Restore session on page load
   useEffect(() => {
@@ -916,8 +963,13 @@ function useCircleWallet() {
   // contractAddress) so callers can read the on-chain receipt themselves
   // to pull out event data (minted tokenId, new lockId, etc.) the same
   // way the app already does for MetaMask/WalletConnect users.
-  const executeContract = useCallback(async ({ contractAddress, abiFunctionSignature, abiParameters }) => {
-    if (!sessionRef.current || !walletId) {
+  // targetWalletId defaults to the Arc wallet (walletId) — every existing
+  // caller (NFT Lock) keeps working unchanged. Bridge is the first caller
+  // that needs to target a DIFFERENT chain's wallet (the source chain,
+  // for approve/burn), so it passes that wallet's id explicitly.
+  const executeContract = useCallback(async ({ contractAddress, abiFunctionSignature, abiParameters, targetWalletId }) => {
+    const useWalletId = targetWalletId || walletId;
+    if (!sessionRef.current || !useWalletId) {
       throw new Error("Not signed in with a Circle wallet.");
     }
     const { userToken, encryptionKey } = sessionRef.current;
@@ -925,7 +977,7 @@ function useCircleWallet() {
     const res = await fetch(`${API_BASE}/circle/contract-execution-challenge`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userToken, walletId, contractAddress, abiFunctionSignature, abiParameters }),
+      body: JSON.stringify({ userToken, walletId: useWalletId, contractAddress, abiFunctionSignature, abiParameters }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -974,6 +1026,7 @@ function useCircleWallet() {
     error,
     address,
     walletId,
+    walletsByChain,
     createDate,
     balance,
     balances,
@@ -982,6 +1035,7 @@ function useCircleWallet() {
     refreshBalance,
     sendTransfer,
     executeContract,
+    createWalletOnChain,
   };
 }
 
@@ -2093,16 +2147,173 @@ const MESSAGE_TRANSMITTER_ABI = [
 function BridgePage({ wallet }) {
   const [sourceKey, setSourceKey] = useState("ETH_SEPOLIA");
   const [amount, setAmount] = useState("");
-  const [status, setStatus] = useState("idle"); // idle | switching | approving | burning | attesting | minting | done | error
+  const [status, setStatus] = useState("idle"); // idle | provisioning | switching | approving | burning | attesting | minting | done | error
   const [log, setLog] = useState([]);
   const [error, setError] = useState(null);
   const busy = status !== "idle" && status !== "done" && status !== "error";
   const source = BRIDGE_SOURCE_CHAINS[sourceKey];
+  const circleSourceWallet = wallet.isCircleWallet ? wallet.circleWalletsByChain?.[source.circleBlockchain] : null;
+  const needsCircleWalletSetup = wallet.isCircleWallet && !circleSourceWallet;
 
   const appendLog = (line) => setLog((l) => [...l, line]);
 
+  // Shared by both wallet paths: Circle explicitly warns against
+  // hardcoding this fee (see the longer comment further down where it's
+  // actually used) — always fetched fresh right before burning.
+  const fetchMaxFee = useCallback(async (amountUnits) => {
+    let maxFee = 500n; // fallback only if the live lookup itself fails
+    try {
+      const feeRes = await fetch(`${API_BASE}/bridge/fee?sourceDomain=${source.domain}&destDomain=${CCTP.ARC_TESTNET_DOMAIN}`);
+      if (feeRes.ok) {
+        const fees = await feeRes.json();
+        const minimumFeeBps = fees?.[0]?.minimumFee;
+        if (typeof minimumFeeBps === "number") {
+          const protocolFee = (amountUnits * BigInt(Math.round(minimumFeeBps * 100))) / 1_000_000n;
+          maxFee = (protocolFee * 120n) / 100n;
+        }
+      }
+    } catch {
+      // fall back to the flat default above
+    }
+    return maxFee;
+  }, [source.domain]);
+
+  const pollAttestation = useCallback(async (burnTxHash) => {
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const res = await fetch(`${API_BASE}/bridge/attestation?domain=${source.domain}&txHash=${burnTxHash}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.messages?.[0]?.status === "complete") return data.messages[0];
+      }
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    return null;
+  }, [source.domain]);
+
+  const runBridgeInjected = useCallback(async (amountUnits) => {
+    setStatus("switching");
+    appendLog(`Switching wallet to ${source.label}…`);
+    await switchViaEthereum(source.chain);
+    // Deliberately a BRAND NEW BrowserProvider here, not wallet.provider.
+    // Ethers v6 throws "network changed" if you call getSigner() on a
+    // provider instance that was already used on a different chain —
+    // even with staticNetwork left at its default — so every leg of
+    // this flow gets its own fresh instance right after switching.
+    const sourceProvider = new ethers.BrowserProvider(window.ethereum);
+    const sourceSigner = await sourceProvider.getSigner();
+
+    setStatus("approving");
+    appendLog("Approving USDC for the CCTP TokenMessenger…");
+    const usdc = new ethers.Contract(source.usdc, SEPOLIA_USDC_ABI, sourceSigner);
+    const approveTx = await withRpcRetry(() => usdc.approve(CCTP_TOKEN_MESSENGER, amountUnits));
+    await withRpcRetry(() => approveTx.wait());
+    appendLog(`Approved — ${approveTx.hash.slice(0, 14)}…`);
+
+    appendLog("Checking the current Fast Transfer fee…");
+    const maxFee = await fetchMaxFee(amountUnits);
+
+    setStatus("burning");
+    appendLog(`Burning USDC on ${source.label}…`);
+    const tokenMessenger = new ethers.Contract(CCTP_TOKEN_MESSENGER, TOKEN_MESSENGER_ABI, sourceSigner);
+    const mintRecipient = ethers.zeroPadValue(wallet.address, 32);
+    const burnTx = await withRpcRetry(() =>
+      tokenMessenger.depositForBurn(
+        amountUnits,
+        CCTP.ARC_TESTNET_DOMAIN,
+        mintRecipient,
+        source.usdc,
+        ethers.ZeroHash, // destinationCaller — zero allows any address to call receiveMessage
+        maxFee,
+        1000 // minFinalityThreshold — 1000 or less selects Fast Transfer
+      )
+    );
+    await withRpcRetry(() => burnTx.wait());
+    appendLog(`Burned — ${burnTx.hash.slice(0, 14)}…`);
+
+    setStatus("attesting");
+    appendLog("Waiting for Circle's attestation (usually under a minute)…");
+    const attestation = await pollAttestation(burnTx.hash);
+    if (!attestation) {
+      throw new Error(
+        `Attestation didn't complete in time. Your USDC was burned on ${source.label} — it isn't lost, but you'll need to complete the mint manually once Circle finishes attesting. Try again shortly.`
+      );
+    }
+    appendLog("Attestation received.");
+
+    setStatus("minting");
+    appendLog("Switching wallet back to Arc Testnet…");
+    await switchViaEthereum(ARC_TESTNET);
+    const arcProvider = new ethers.BrowserProvider(window.ethereum);
+    const arcSigner = await arcProvider.getSigner();
+    const transmitter = new ethers.Contract(CCTP.ARC_TESTNET_MESSAGE_TRANSMITTER, MESSAGE_TRANSMITTER_ABI, arcSigner);
+    appendLog("Minting USDC on Arc Testnet…");
+    const mintTx = await withRpcRetry(() => transmitter.receiveMessage(attestation.message, attestation.attestation));
+    await withRpcRetry(() => mintTx.wait());
+    appendLog(`Minted — ${mintTx.hash.slice(0, 14)}…`);
+  }, [wallet.address, source, fetchMaxFee, pollAttestation]);
+
+  // Circle wallets don't have a "switch network" concept — each
+  // blockchain is a genuinely separate wallet (different walletId, same
+  // Circle user), so this skips the switching steps entirely and just
+  // targets the right wallet per call via executeContract's
+  // targetWalletId. Every step is a PIN-confirmed challenge instead of a
+  // MetaMask popup, same pattern already used for NFT Lock.
+  const runBridgeCircle = useCallback(async (amountUnits) => {
+    setStatus("approving");
+    appendLog("Approving USDC for the CCTP TokenMessenger…");
+    await wallet.circleExecuteContract({
+      contractAddress: source.usdc,
+      abiFunctionSignature: "approve(address,uint256)",
+      abiParameters: [CCTP_TOKEN_MESSENGER, String(amountUnits)],
+      targetWalletId: circleSourceWallet.id,
+    });
+    appendLog("Approved.");
+
+    appendLog("Checking the current Fast Transfer fee…");
+    const maxFee = await fetchMaxFee(amountUnits);
+
+    setStatus("burning");
+    appendLog(`Burning USDC on ${source.label}…`);
+    const mintRecipient = ethers.zeroPadValue(wallet.address, 32);
+    const burnTxHash = await wallet.circleExecuteContract({
+      contractAddress: CCTP_TOKEN_MESSENGER,
+      abiFunctionSignature: "depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)",
+      abiParameters: [
+        String(amountUnits),
+        String(CCTP.ARC_TESTNET_DOMAIN),
+        mintRecipient,
+        source.usdc,
+        ethers.ZeroHash,
+        String(maxFee),
+        "1000",
+      ],
+      targetWalletId: circleSourceWallet.id,
+    });
+    appendLog(`Burned — ${burnTxHash.slice(0, 14)}…`);
+
+    setStatus("attesting");
+    appendLog("Waiting for Circle's attestation (usually under a minute)…");
+    const attestation = await pollAttestation(burnTxHash);
+    if (!attestation) {
+      throw new Error(
+        `Attestation didn't complete in time. Your USDC was burned on ${source.label} — it isn't lost, but you'll need to complete the mint manually once Circle finishes attesting. Try again shortly.`
+      );
+    }
+    appendLog("Attestation received.");
+
+    setStatus("minting");
+    appendLog("Minting USDC on Arc Testnet…");
+    await wallet.circleExecuteContract({
+      contractAddress: CCTP.ARC_TESTNET_MESSAGE_TRANSMITTER,
+      abiFunctionSignature: "receiveMessage(bytes,bytes)",
+      abiParameters: [attestation.message, attestation.attestation],
+      // no targetWalletId — defaults to the Arc wallet, which is exactly where this needs to run
+    });
+    appendLog("Minted.");
+  }, [wallet, source, circleSourceWallet, fetchMaxFee, pollAttestation]);
+
   const runBridge = useCallback(async () => {
-    if (!wallet.provider || !wallet.address) {
+    if (!wallet.address) {
       toast({ category: "Bridge", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
@@ -2110,107 +2321,19 @@ function BridgePage({ wallet }) {
       toast({ category: "Bridge", tone: "bad", title: "Invalid amount", message: "Enter an amount to bridge." });
       return;
     }
+    if (needsCircleWalletSetup) {
+      toast({ category: "Bridge", tone: "bad", title: "Wallet not set up", message: `Set up your ${source.label} wallet first.` });
+      return;
+    }
     setError(null);
     setLog([]);
     try {
-      setStatus("switching");
-      appendLog(`Switching wallet to ${source.label}…`);
-      await switchViaEthereum(source.chain);
-      // Deliberately a BRAND NEW BrowserProvider here, not wallet.provider.
-      // Ethers v6 throws "network changed" if you call getSigner() on a
-      // provider instance that was already used on a different chain —
-      // even with staticNetwork left at its default — so every leg of
-      // this flow gets its own fresh instance right after switching.
-      const sourceProvider = new ethers.BrowserProvider(window.ethereum);
-      const sourceSigner = await sourceProvider.getSigner();
-
-      setStatus("approving");
-      appendLog("Approving USDC for the CCTP TokenMessenger…");
-      const usdc = new ethers.Contract(source.usdc, SEPOLIA_USDC_ABI, sourceSigner);
       const amountUnits = ethers.parseUnits(amount, CCTP_USDC_DECIMALS);
-      const approveTx = await withRpcRetry(() => usdc.approve(CCTP_TOKEN_MESSENGER, amountUnits));
-      await withRpcRetry(() => approveTx.wait());
-      appendLog(`Approved — ${approveTx.hash.slice(0, 14)}…`);
-
-      // Circle explicitly warns against hardcoding this: maxFee has to be
-      // fetched fresh, since a value that's high enough today can quietly
-      // fall below Circle's current minimum tomorrow. When that happens
-      // the burn doesn't fail — it just silently downgrades from Fast
-      // Transfer (~30s) to Standard Transfer (waits for full source-chain
-      // finality, which is what happened the first time this ran with a
-      // hardcoded fee).
-      appendLog("Checking the current Fast Transfer fee…");
-      let maxFee = 500n; // fallback only if the fee lookup itself fails
-      try {
-        const feeRes = await fetch(`${API_BASE}/bridge/fee?sourceDomain=${source.domain}&destDomain=${CCTP.ARC_TESTNET_DOMAIN}`);
-        if (feeRes.ok) {
-          const fees = await feeRes.json();
-          const minimumFeeBps = fees?.[0]?.minimumFee;
-          if (typeof minimumFeeBps === "number") {
-            // Circle's own formula: fee = amount * (bps / 10,000), scaled
-            // by 100 first (via Math.round) to tolerate fractional bps
-            // without floating-point error, then a 20% buffer on top so a
-            // small fee increase between this quote and the burn landing
-            // on-chain doesn't push it back under the threshold again.
-            const protocolFee = (amountUnits * BigInt(Math.round(minimumFeeBps * 100))) / 1_000_000n;
-            maxFee = (protocolFee * 120n) / 100n;
-          }
-        }
-      } catch {
-        // Network hiccup on the fee lookup — fall back to the flat default
-        // above rather than blocking the whole bridge attempt on it.
+      if (wallet.isCircleWallet) {
+        await runBridgeCircle(amountUnits);
+      } else {
+        await runBridgeInjected(amountUnits);
       }
-
-      setStatus("burning");
-      appendLog(`Burning USDC on ${source.label}…`);
-      const tokenMessenger = new ethers.Contract(CCTP_TOKEN_MESSENGER, TOKEN_MESSENGER_ABI, sourceSigner);
-      const mintRecipient = ethers.zeroPadValue(wallet.address, 32);
-      const burnTx = await withRpcRetry(() =>
-        tokenMessenger.depositForBurn(
-          amountUnits,
-          CCTP.ARC_TESTNET_DOMAIN,
-          mintRecipient,
-          source.usdc,
-          ethers.ZeroHash, // destinationCaller — zero allows any address to call receiveMessage
-          maxFee,
-          1000 // minFinalityThreshold — 1000 or less selects Fast Transfer
-        )
-      );
-      await withRpcRetry(() => burnTx.wait());
-      appendLog(`Burned — ${burnTx.hash.slice(0, 14)}…`);
-
-      setStatus("attesting");
-      appendLog("Waiting for Circle's attestation (usually under a minute)…");
-      let attestation = null;
-      for (let attempt = 0; attempt < 60; attempt++) {
-        const res = await fetch(`${API_BASE}/bridge/attestation?domain=${source.domain}&txHash=${burnTx.hash}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data?.messages?.[0]?.status === "complete") {
-            attestation = data.messages[0];
-            break;
-          }
-        }
-        await new Promise((r) => setTimeout(r, 5000));
-      }
-      if (!attestation) {
-        throw new Error(
-          `Attestation didn't complete in time. Your USDC was burned on ${source.label} — it isn't lost, but you'll need to complete the mint manually once Circle finishes attesting. Try again shortly.`
-        );
-      }
-      appendLog("Attestation received.");
-
-      setStatus("minting");
-      appendLog("Switching wallet back to Arc Testnet…");
-      await switchViaEthereum(ARC_TESTNET);
-      const arcProvider = new ethers.BrowserProvider(window.ethereum);
-      const arcSigner = await arcProvider.getSigner();
-      const transmitter = new ethers.Contract(CCTP.ARC_TESTNET_MESSAGE_TRANSMITTER, MESSAGE_TRANSMITTER_ABI, arcSigner);
-      appendLog("Minting USDC on Arc Testnet…");
-      const mintTx = await withRpcRetry(() => transmitter.receiveMessage(attestation.message, attestation.attestation));
-      await withRpcRetry(() => mintTx.wait());
-      appendLog(`Minted — ${mintTx.hash.slice(0, 14)}…`);
-
       setStatus("done");
       toast({ category: "Bridge", tone: "ok", title: "Bridge complete", message: `${amount} USDC arrived on Arc Testnet.` });
     } catch (e) {
@@ -2218,21 +2341,20 @@ function BridgePage({ wallet }) {
       setStatus("error");
       toast({ category: "Bridge", tone: "bad", title: "Bridge failed", message: e.shortMessage || e.message });
     }
-  }, [wallet, amount, source]);
+  }, [wallet, amount, source, needsCircleWalletSetup, runBridgeCircle, runBridgeInjected]);
 
-  if (wallet.isCircleWallet) {
-    return (
-      <GlassCard className="p-6 max-w-lg">
-        <h2 className="text-white text-lg font-semibold mb-2">Bridge</h2>
-        <p className="text-white/50 text-sm">
-          Bridging isn't wired up for Circle Wallets (email login) yet — it
-          would need this Circle user to also hold a wallet on the source
-          chain too, which is a separate build. Sign in with MetaMask or
-          WalletConnect to bridge USDC in right now.
-        </p>
-      </GlassCard>
-    );
-  }
+  const [settingUpWallet, setSettingUpWallet] = useState(false);
+  const handleSetupWallet = useCallback(async () => {
+    setSettingUpWallet(true);
+    try {
+      await wallet.circleCreateWallet(source.circleBlockchain);
+      toast({ category: "Bridge", tone: "ok", title: "Wallet ready", message: `Set up on ${source.label}.` });
+    } catch (e) {
+      toast({ category: "Bridge", tone: "bad", title: "Setup failed", message: e.shortMessage || e.message });
+    } finally {
+      setSettingUpWallet(false);
+    }
+  }, [wallet, source]);
 
   return (
     <GlassCard className="p-6 max-w-lg">
@@ -2240,8 +2362,10 @@ function BridgePage({ wallet }) {
       <p className="text-white/40 text-xs mb-4">
         Move USDC in from another testnet via Circle's CCTP — a real burn on
         the source chain and a fresh native mint on Arc, not a wrapped
-        token. Your wallet will prompt you to switch networks twice
-        (source chain to burn, Arc to mint).
+        token.{" "}
+        {wallet.isCircleWallet
+          ? "Each step is a separate PIN confirmation."
+          : "Your wallet will prompt you to switch networks twice (source chain to burn, Arc to mint)."}
       </p>
 
       <label className="text-white/50 text-xs">From</label>
@@ -2256,18 +2380,31 @@ function BridgePage({ wallet }) {
         ))}
       </select>
 
-      <label className="text-white/50 text-xs">Amount (USDC on {source.label})</label>
-      <input
-        value={amount}
-        onChange={(e) => setAmount(e.target.value)}
-        placeholder="0.00"
-        disabled={busy}
-        className="w-full mt-1 mb-4 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
-      />
+      {needsCircleWalletSetup ? (
+        <div className="mb-4 bg-cyan-950/30 border border-cyan-500/20 rounded-lg p-3">
+          <p className="text-cyan-200 text-xs mb-2">
+            Your Circle Wallet doesn't have a wallet on {source.label} yet — needed to hold and burn USDC there. One-time setup, PIN-confirmed.
+          </p>
+          <PrimaryButton disabled={settingUpWallet} onClick={handleSetupWallet}>
+            {settingUpWallet ? "Setting up…" : `Set up ${source.label} wallet`}
+          </PrimaryButton>
+        </div>
+      ) : (
+        <>
+          <label className="text-white/50 text-xs">Amount (USDC on {source.label})</label>
+          <input
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            placeholder="0.00"
+            disabled={busy}
+            className="w-full mt-1 mb-4 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+          />
 
-      <PrimaryButton disabled={busy} onClick={runBridge}>
-        {busy ? "Bridging…" : "Bridge to Arc Testnet"}
-      </PrimaryButton>
+          <PrimaryButton disabled={busy} onClick={runBridge}>
+            {busy ? "Bridging…" : "Bridge to Arc Testnet"}
+          </PrimaryButton>
+        </>
+      )}
 
       {log.length > 0 && (
         <div className="mt-4 space-y-1">
@@ -3506,6 +3643,8 @@ export default function ArcTestnetDApp() {
         qrUri: null,
         isCircleWallet: true,
         createDate: circleWallet.createDate,
+        circleWalletsByChain: circleWallet.walletsByChain,
+        circleCreateWallet: circleWallet.createWalletOnChain,
         circleBalance: circleWallet.balance,
         circleBalances: circleWallet.balances,
         refreshCircleBalance: circleWallet.refreshBalance,
