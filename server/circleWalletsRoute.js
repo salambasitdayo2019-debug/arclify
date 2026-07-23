@@ -306,10 +306,12 @@ router.post("/circle/contract-execution-challenge", async (req, res) => {
  */
 router.get("/circle/transactions", async (req, res) => {
   if (!requireApiKey(res)) return;
-  const userToken = req.query.userToken;
+  const { userToken, walletId } = req.query;
   if (!userToken) return res.status(400).json({ error: "Missing userToken." });
   try {
-    const response = await fetch(`${CIRCLE_BASE_URL}/v1/w3s/transactions?pageSize=10`, {
+    const params = new URLSearchParams({ pageSize: "20" });
+    if (walletId) params.set("walletIds", walletId); // narrows the list to just the wallet we actually care about
+    const response = await fetch(`${CIRCLE_BASE_URL}/v1/w3s/transactions?${params}`, {
       method: "GET",
       headers: {
         Accept: "application/json",
