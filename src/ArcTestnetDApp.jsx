@@ -975,7 +975,7 @@ function useCircleWallet() {
   // fully determines which chain a call runs on (confirmed directly from
   // Circle's own validation error: walletId + blockchain together is an
   // invalid combination, not a disambiguation).
-  const executeContract = useCallback(async ({ contractAddress, abiFunctionSignature, abiParameters, targetWalletId }) => {
+  const executeContract = useCallback(async ({ contractAddress, abiFunctionSignature, abiParameters, targetWalletId, onPoll }) => {
     const useWalletId = targetWalletId || walletId;
     if (!sessionRef.current || !useWalletId) {
       throw new Error("Not signed in with a Circle wallet.");
@@ -1016,12 +1016,20 @@ function useCircleWallet() {
     });
 
     // The SDK callback doesn't hand back a txHash, so poll Circle's own
-    // transaction list for the most recent transaction against this
-    // contract and wait for it to reach a state that has a txHash.
-    for (let attempt = 0; attempt < 8; attempt++) {
-      await new Promise((r) => setTimeout(r, 1500));
+    // transaction list for the matching transaction and wait for it to
+    // reach a state that has a txHash. Filtered to just this wallet
+    // (Circle's own walletIds param) so it isn't crowded out by
+    // unrelated activity on other wallets under the same Circle account.
+    // Generous window — a burn on an external testnet (Sepolia, Base
+    // Sepolia, Fuji) can take meaningfully longer to get a txHash
+    // populated than a same-chain Arc transaction does.
+    for (let attempt = 0; attempt < 40; attempt++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (onPoll && attempt > 0 && attempt % 5 === 0) onPoll(attempt * 3);
       try {
-        const listRes = await fetch(`${API_BASE}/circle/transactions?userToken=${encodeURIComponent(userToken)}`);
+        const listRes = await fetch(
+          `${API_BASE}/circle/transactions?userToken=${encodeURIComponent(userToken)}&walletId=${useWalletId}`
+        );
         if (!listRes.ok) continue;
         const { transactions } = await listRes.json();
         const match = transactions?.find(
@@ -2302,6 +2310,7 @@ function BridgePage({ wallet }) {
         "1000",
       ],
       targetWalletId: circleSourceWallet.id,
+      onPoll: (seconds) => appendLog(`Still waiting on ${source.label} to confirm the burn (${seconds}s)…`),
     });
     appendLog(`Burned — ${burnTxHash.slice(0, 14)}…`);
 
