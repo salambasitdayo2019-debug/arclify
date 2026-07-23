@@ -254,7 +254,7 @@ router.post("/circle/transfer-challenge", async (req, res) => {
  */
 router.post("/circle/contract-execution-challenge", async (req, res) => {
   if (!requireApiKey(res)) return;
-  const { userToken, walletId, contractAddress, abiFunctionSignature, abiParameters } = req.body || {};
+  const { userToken, walletId, contractAddress, abiFunctionSignature, abiParameters, blockchain } = req.body || {};
   if (!userToken || !walletId || !contractAddress || !abiFunctionSignature) {
     return res.status(400).json({ error: "Missing required fields." });
   }
@@ -273,7 +273,12 @@ router.post("/circle/contract-execution-challenge", async (req, res) => {
         abiFunctionSignature,
         abiParameters: abiParameters || [],
         feeLevel: "MEDIUM",
-        blockchain: PRIMARY_BLOCKCHAIN,
+        // Was hardcoded to Arc — broke the instant a caller (Bridge)
+        // targeted a wallet on a different chain, since Circle validates
+        // that this matches the wallet actually being used. Now passed
+        // through explicitly by the caller, defaulting to Arc so NFT
+        // Lock's existing calls (which never specify it) are unaffected.
+        blockchain: blockchain || PRIMARY_BLOCKCHAIN,
       }),
     });
     const data = await response.json();
