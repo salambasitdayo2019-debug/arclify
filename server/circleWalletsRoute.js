@@ -254,7 +254,7 @@ router.post("/circle/transfer-challenge", async (req, res) => {
  */
 router.post("/circle/contract-execution-challenge", async (req, res) => {
   if (!requireApiKey(res)) return;
-  const { userToken, walletId, contractAddress, abiFunctionSignature, abiParameters, blockchain } = req.body || {};
+  const { userToken, walletId, contractAddress, abiFunctionSignature, abiParameters } = req.body || {};
   if (!userToken || !walletId || !contractAddress || !abiFunctionSignature) {
     return res.status(400).json({ error: "Missing required fields." });
   }
@@ -273,12 +273,16 @@ router.post("/circle/contract-execution-challenge", async (req, res) => {
         abiFunctionSignature,
         abiParameters: abiParameters || [],
         feeLevel: "MEDIUM",
-        // Was hardcoded to Arc — broke the instant a caller (Bridge)
-        // targeted a wallet on a different chain, since Circle validates
-        // that this matches the wallet actually being used. Now passed
-        // through explicitly by the caller, defaulting to Arc so NFT
-        // Lock's existing calls (which never specify it) are unaffected.
-        blockchain: blockchain || PRIMARY_BLOCKCHAIN,
+        // NO `blockchain` field here on purpose — confirmed directly from
+        // Circle's own validation error: `walletId` and `blockchain` are
+        // mutually exclusive addressing modes (walletId alone, OR
+        // blockchain+walletAddress together, never walletId+blockchain).
+        // walletId already fully determines which chain this runs on,
+        // since a wallet is bound to one specific blockchain at creation
+        // — adding `blockchain` on top isn't disambiguation, it's an
+        // invalid combination. An earlier version of this endpoint added
+        // `blockchain` thinking it was needed once Bridge started
+        // targeting non-Arc wallets; that was the wrong fix.
       }),
     });
     const data = await response.json();
