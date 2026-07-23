@@ -674,6 +674,7 @@ function useCircleWallet() {
   const [error, setError] = useState(null);
   const [address, setAddress] = useState(null);
   const [walletId, setWalletId] = useState(null);
+  const [createDate, setCreateDate] = useState(null);
   const [balance, setBalance] = useState(null);
   const [balances, setBalances] = useState({ USDC: "0", EURC: "0", cirBTC: "0" });
   const sdkRef = useRef(null);
@@ -723,6 +724,7 @@ function useCircleWallet() {
     if (!primary) return null;
     setAddress(primary.address);
     setWalletId(primary.id);
+    setCreateDate(primary.createDate || null); // ISO-8601, straight from Circle's wallet object
 
     const balRes = await fetch(`${API_BASE}/circle/balance?userToken=${encodeURIComponent(userToken)}&walletId=${primary.id}`);
     if (balRes.ok) {
@@ -972,6 +974,7 @@ function useCircleWallet() {
     error,
     address,
     walletId,
+    createDate,
     balance,
     balances,
     loginWithEmail,
@@ -997,11 +1000,11 @@ const GlassCard = ({ children, className = "" }) => (
 const PrimaryButton = ({ children, disabled, ...props }) => (
   <button
     disabled={disabled}
-    className={`px-5 py-2.5 rounded-xl font-medium text-sm transition
+    className={`px-5 py-2.5 rounded-xl font-medium text-sm transition border
       ${
         disabled
-          ? "bg-white/5 text-white/30 cursor-not-allowed"
-          : "bg-gradient-to-r from-cyan-500 to-purple-600 text-white hover:brightness-110 active:scale-[0.98]"
+          ? "bg-white/10 text-white/50 border-white/15 cursor-not-allowed"
+          : "bg-gradient-to-r from-cyan-500 to-purple-600 text-white border-transparent hover:brightness-110 active:scale-[0.98]"
       }`}
     {...props}
   >
@@ -3122,6 +3125,18 @@ function WalletProfilePage({ wallet }) {
       <p className="text-white font-mono text-sm mb-3 break-all">{wallet.address || "—"}</p>
       <p className="text-white/50 text-xs">Network</p>
       <p className="text-white text-sm mb-3">{wallet.chainId ?? "—"}</p>
+      <p className="text-white/50 text-xs">Wallet created</p>
+      {wallet.isCircleWallet ? (
+        <p className="text-white text-sm mb-3">
+          {wallet.createDate
+            ? new Date(wallet.createDate).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })
+            : "—"}
+        </p>
+      ) : (
+        <p className="text-white/40 text-sm mb-3">
+          Not available — MetaMask/WalletConnect wallets are just key pairs with no registration event, so there's no "creation date" to report. This is only known for Circle email wallets, since Circle's own records include it.
+        </p>
+      )}
       <a
         href={`${ARC_TESTNET.blockExplorerUrls[0]}/address/${wallet.address}`}
         target="_blank"
@@ -3490,6 +3505,7 @@ export default function ArcTestnetDApp() {
         disconnect: circleWallet.logout,
         qrUri: null,
         isCircleWallet: true,
+        createDate: circleWallet.createDate,
         circleBalance: circleWallet.balance,
         circleBalances: circleWallet.balances,
         refreshCircleBalance: circleWallet.refreshBalance,
