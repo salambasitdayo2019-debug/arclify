@@ -107,6 +107,44 @@ router.post("/circle/initialize-user", async (req, res) => {
   }
 });
 
+/**
+ * POST /api/circle/create-wallet
+ *
+ * Phase 3 (Bridge for Circle Wallets): provisions a wallet for the SAME
+ * Circle user on an ADDITIONAL blockchain beyond Arc — e.g. ETH-SEPOLIA,
+ * so they can hold USDC there to bridge in. Same challenge->PIN pattern
+ * as every other Circle action in this app; the frontend executes the
+ * returned challengeId via the Web SDK, then re-fetches the wallet list
+ * to pick up the newly created wallet.
+ */
+router.post("/circle/create-wallet", async (req, res) => {
+  if (!requireApiKey(res)) return;
+  const { userToken, blockchain } = req.body || {};
+  if (!userToken || !blockchain) {
+    return res.status(400).json({ error: "Missing userToken or blockchain." });
+  }
+  try {
+    const response = await fetch(`${CIRCLE_BASE_URL}/v1/w3s/user/wallets`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+        "X-User-Token": userToken,
+      },
+      body: JSON.stringify({
+        idempotencyKey: crypto.randomUUID(),
+        accountType: ACCOUNT_TYPE, // match the account type the user was already initialized with
+        blockchains: [blockchain],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json(data);
+    res.json(data.data); // { challengeId }
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Failed to create wallet." });
+  }
+});
+
 router.get("/circle/wallets", async (req, res) => {
   if (!requireApiKey(res)) return;
   const userToken = req.query.userToken;
