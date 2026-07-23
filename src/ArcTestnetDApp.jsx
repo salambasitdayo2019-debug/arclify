@@ -967,13 +967,15 @@ function useCircleWallet() {
   // caller (NFT Lock) keeps working unchanged. Bridge is the first caller
   // that needs to target a DIFFERENT chain's wallet (the source chain,
   // for approve/burn), so it passes that wallet's id explicitly.
-  // targetWalletId/targetBlockchain default to the Arc wallet — every
-  // existing caller (NFT Lock) keeps working unchanged. Bridge is the
-  // first caller that needs to target a DIFFERENT chain's wallet (the
-  // source chain, for approve/burn), and Circle validates that the
-  // blockchain field matches whatever wallet is actually being used —
-  // so both have to travel together, not just the wallet id.
-  const executeContract = useCallback(async ({ contractAddress, abiFunctionSignature, abiParameters, targetWalletId, targetBlockchain }) => {
+  // targetWalletId defaults to the Arc wallet — every existing caller
+  // (NFT Lock) keeps working unchanged. Bridge is the first caller that
+  // needs to target a DIFFERENT chain's wallet (the source chain, for
+  // approve/burn), so it passes that wallet's id explicitly. No separate
+  // "blockchain" field is needed alongside it — walletId alone already
+  // fully determines which chain a call runs on (confirmed directly from
+  // Circle's own validation error: walletId + blockchain together is an
+  // invalid combination, not a disambiguation).
+  const executeContract = useCallback(async ({ contractAddress, abiFunctionSignature, abiParameters, targetWalletId }) => {
     const useWalletId = targetWalletId || walletId;
     if (!sessionRef.current || !useWalletId) {
       throw new Error("Not signed in with a Circle wallet.");
@@ -989,7 +991,6 @@ function useCircleWallet() {
         contractAddress,
         abiFunctionSignature,
         abiParameters,
-        blockchain: targetBlockchain,
       }),
     });
     if (!res.ok) {
@@ -2279,7 +2280,6 @@ function BridgePage({ wallet }) {
       abiFunctionSignature: "approve(address,uint256)",
       abiParameters: [CCTP_TOKEN_MESSENGER, String(amountUnits)],
       targetWalletId: circleSourceWallet.id,
-      targetBlockchain: source.circleBlockchain,
     });
     appendLog("Approved.");
 
@@ -2302,7 +2302,6 @@ function BridgePage({ wallet }) {
         "1000",
       ],
       targetWalletId: circleSourceWallet.id,
-      targetBlockchain: source.circleBlockchain,
     });
     appendLog(`Burned — ${burnTxHash.slice(0, 14)}…`);
 
