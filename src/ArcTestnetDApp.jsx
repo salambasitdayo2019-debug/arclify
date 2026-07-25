@@ -2414,6 +2414,20 @@ function BridgePage({ wallet }) {
         </div>
       ) : (
         <>
+          {wallet.isCircleWallet && circleSourceWallet && (
+            <p className="text-white/40 text-[11px] mb-3 break-all">
+              Your {source.label} wallet: <span className="font-mono">{circleSourceWallet.address}</span>
+              {" — "}
+              <a
+                href={`${source.chain.blockExplorerUrls[0]}/address/${circleSourceWallet.address}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-cyan-300"
+              >
+                view on explorer →
+              </a>
+            </p>
+          )}
           <label className="text-white/50 text-xs">Amount (USDC on {source.label})</label>
           <input
             value={amount}
