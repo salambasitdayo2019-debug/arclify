@@ -1557,6 +1557,7 @@ const NAV_ITEMS = [
   "Swap",
   "Bridge",
   "Lending",
+  "Off-Ramp",
   "NFT Lock",
   "Activity",
   "History",
@@ -2744,6 +2745,229 @@ function LendingPage({ wallet }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Page: Off-Ramp (PROTOTYPE) — USDC/EURC -> local currency payout     */
+/*                                                                      */
+/*  Two genuinely different halves, and it matters that they're kept    */
+/*  visually distinct rather than blurred together:                     */
+/*                                                                      */
+/*  REAL: the exchange rate (live public FX feed) and the on-chain leg  */
+/*  — the token actually leaves the user's wallet on Arc Testnet,       */
+/*  verifiable on Arcscan like any other transaction here.              */
+/*                                                                      */
+/*  SIMULATED: the fiat payout. Actually paying into a bank account or  */
+/*  mobile money wallet needs a licensed money-transmitter partner      */
+/*  (e.g. HoneyCoin, Eversend, Quidax for African corridors) — real     */
+/*  business credentials this testnet project doesn't have. Swapping    */
+/*  in a real provider later only touches the /offramp/simulate call,   */
+/*  not this page's structure.                                          */
+/* ------------------------------------------------------------------ */
+
+// Testnet burn address — where the demo's "real" on-chain leg sends
+// funds, standing in for "custody handed off to an off-ramp provider."
+// Not a real provider's deposit address; nothing is recoverable from
+// here, same as any burn address, which is honest for what this is.
+const OFFRAMP_DEMO_ADDRESS = "0x000000000000000000000000000000000000dEaD";
+
+const OFFRAMP_CURRENCIES = { NGN: "Nigerian Naira", KES: "Kenyan Shilling", GHS: "Ghanaian Cedi" };
+
+function OffRampPage({ wallet }) {
+  const [token, setToken] = useState("USDC");
+  const [amount, setAmount] = useState("");
+  const [currency, setCurrency] = useState("NGN");
+  const [payoutMethod, setPayoutMethod] = useState("bank");
+  const [bankName, setBankName] = useState("");
+  const [accountNumber, setAccountNumber] = useState("");
+  const [momoProvider, setMomoProvider] = useState("");
+  const [phone, setPhone] = useState("");
+
+  const [rate, setRate] = useState(null); // { rate, currencyName, asOf, source }
+  const [rateLoading, setRateLoading] = useState(false);
+  const [step, setStep] = useState("idle"); // idle | onchain | converting | paying_out | settled | error
+  const [log, setLog] = useState([]);
+  const [result, setResult] = useState(null);
+  const busy = step !== "idle" && step !== "settled" && step !== "error";
+
+  const appendLog = (line) => setLog((l) => [...l, line]);
+
+  const fetchRate = useCallback(async () => {
+    setRateLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/offramp/rate?currency=${currency}`);
+      if (!res.ok) throw new Error("Rate lookup failed.");
+      setRate(await res.json());
+    } catch (e) {
+      toast({ category: "Off-Ramp", tone: "bad", title: "Rate lookup failed", message: e.message });
+      setRate(null);
+    } finally {
+      setRateLoading(false);
+    }
+  }, [currency]);
+
+  useEffect(() => { fetchRate(); }, [fetchRate]);
+
+  const localAmount = rate && amount ? (Number(amount) * rate.rate).toLocaleString(undefined, { maximumFractionDigits: 2 }) : null;
+
+  const handleCashOut = useCallback(async () => {
+    if (!wallet.address) {
+      toast({ category: "Off-Ramp", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      return;
+    }
+    if (!amount || Number(amount) <= 0) {
+      toast({ category: "Off-Ramp", tone: "bad", title: "Invalid amount", message: "Enter an amount to cash out." });
+      return;
+    }
+    if (payoutMethod === "bank" && (!bankName || !accountNumber)) {
+      toast({ category: "Off-Ramp", tone: "bad", title: "Missing details", message: "Enter a bank name and account number." });
+      return;
+    }
+    if (payoutMethod === "momo" && (!momoProvider || !phone)) {
+      toast({ category: "Off-Ramp", tone: "bad", title: "Missing details", message: "Enter a mobile money provider and phone number." });
+      return;
+    }
+
+    setLog([]);
+    setResult(null);
+    try {
+      // --- REAL leg: send the token on-chain, same pattern as Transfer ---
+      setStep("onchain");
+      appendLog(`Sending ${amount} ${token} on-chain…`);
+      if (wallet.isCircleWallet) {
+        const tokenAddress = token === NATIVE_TOKEN_SYMBOL ? undefined : CONTRACTS[token];
+        await wallet.circleSendTransfer({ to: OFFRAMP_DEMO_ADDRESS, amount, tokenAddress });
+      } else {
+        const signer = await wallet.provider.getSigner();
+        let tx;
+        if (token === NATIVE_TOKEN_SYMBOL) {
+          tx = await withRpcRetry(() => signer.sendTransaction({ to: OFFRAMP_DEMO_ADDRESS, value: ethers.parseUnits(amount, NATIVE_BALANCE_DECIMALS) }));
+        } else {
+          const contract = new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
+          tx = await withRpcRetry(() => contract.transfer(OFFRAMP_DEMO_ADDRESS, ethers.parseUnits(amount, TOKEN_DECIMALS[token])));
+        }
+        await withRpcRetry(() => tx.wait());
+        appendLog(`On-chain — ${tx.hash.slice(0, 18)}… (real, verifiable on Arcscan)`);
+      }
+      appendLog("On-chain leg complete.");
+
+      // --- SIMULATED leg from here down ---
+      setStep("converting");
+      appendLog(`Converting to ${currency} at today's rate (simulated settlement)…`);
+      await new Promise((r) => setTimeout(r, 1200));
+
+      setStep("paying_out");
+      const accountLabel = payoutMethod === "bank" ? `${bankName} •••• ${accountNumber.slice(-4)}` : `${momoProvider} ${phone}`;
+      appendLog(`Initiating payout to ${accountLabel} (simulated)…`);
+      const res = await fetch(`${API_BASE}/offramp/simulate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount, token, currency, payoutMethod, accountLabel }),
+      });
+      const data = await res.json();
+      await new Promise((r) => setTimeout(r, 1000));
+
+      setStep("settled");
+      setResult({ ...data, localAmount });
+      appendLog(`Settled — ref ${data.reference} (simulated).`);
+      toast({ category: "Off-Ramp", tone: "ok", title: "Cash out complete (demo)", message: `${localAmount} ${currency} — ${data.reference}` });
+    } catch (e) {
+      setStep("error");
+      toast({ category: "Off-Ramp", tone: "bad", title: "Cash out failed", message: e.shortMessage || e.message });
+    }
+  }, [wallet, token, amount, currency, payoutMethod, bankName, accountNumber, momoProvider, phone, localAmount]);
+
+  return (
+    <GlassCard className="p-6 max-w-lg">
+      <h2 className="text-white text-lg font-semibold mb-1">Off-Ramp</h2>
+      <p className="text-white/40 text-xs mb-3">
+        Cash out USDC/EURC to a bank account or mobile money — the "last mile" of a stablecoin product.
+      </p>
+      <div className="bg-amber-950/30 border border-amber-500/20 rounded-lg p-3 mb-4">
+        <p className="text-amber-200 text-xs font-medium mb-1">Prototype — partly real, partly simulated</p>
+        <p className="text-amber-200/70 text-[11px] leading-relaxed">
+          The exchange rate is live, and your {token} genuinely leaves your wallet on-chain. The bank/mobile
+          money payout itself is simulated — real settlement needs a licensed provider (e.g. HoneyCoin,
+          Eversend, Quidax), which needs a business account this testnet project doesn't have.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 mb-3">
+        <div>
+          <label className="text-white/50 text-xs">Token</label>
+          <select value={token} onChange={(e) => setToken(e.target.value)} disabled={busy}
+            className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm">
+            <option value="USDC">USDC</option>
+            <option value="EURC">EURC</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-white/50 text-xs">Payout currency</label>
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)} disabled={busy}
+            className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm">
+            {Object.entries(OFFRAMP_CURRENCIES).map(([code, name]) => (
+              <option key={code} value={code}>{code} — {name}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <label className="text-white/50 text-xs">Amount ({token})</label>
+      <input value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" disabled={busy}
+        className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white" />
+
+      <p className="text-xs text-white/40 mb-4">
+        {rateLoading ? "Fetching live rate…" : rate
+          ? `1 USD = ${rate.rate.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${rate.currency} (live, updated ${new Date(rate.asOf).toLocaleDateString()})`
+          : "Rate unavailable"}
+        {localAmount && <span className="text-cyan-300"> — you'll receive ≈ {localAmount} {currency}</span>}
+      </p>
+
+      <label className="text-white/50 text-xs">Payout method</label>
+      <div className="flex gap-2 mt-1 mb-3">
+        <button onClick={() => setPayoutMethod("bank")} disabled={busy}
+          className={`flex-1 text-sm py-2 rounded-lg border ${payoutMethod === "bank" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-white/5 border-white/10 text-white/50"}`}>
+          Bank Transfer
+        </button>
+        <button onClick={() => setPayoutMethod("momo")} disabled={busy}
+          className={`flex-1 text-sm py-2 rounded-lg border ${payoutMethod === "momo" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-white/5 border-white/10 text-white/50"}`}>
+          Mobile Money
+        </button>
+      </div>
+
+      {payoutMethod === "bank" ? (
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <input value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="Bank name" disabled={busy}
+            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+          <input value={accountNumber} onChange={(e) => setAccountNumber(e.target.value)} placeholder="Account number" disabled={busy}
+            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <input value={momoProvider} onChange={(e) => setMomoProvider(e.target.value)} placeholder="Provider (e.g. M-Pesa)" disabled={busy}
+            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+          <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone number" disabled={busy}
+            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+        </div>
+      )}
+
+      <PrimaryButton disabled={busy} onClick={handleCashOut}>
+        {busy ? "Processing…" : "Cash Out"}
+      </PrimaryButton>
+
+      {log.length > 0 && (
+        <div className="mt-4 space-y-1">
+          {log.map((line, i) => <p key={i} className="text-white/60 text-xs font-mono">{line}</p>)}
+        </div>
+      )}
+      {result && step === "settled" && (
+        <div className="mt-3 bg-emerald-950/30 border border-emerald-500/20 rounded-lg p-3">
+          <p className="text-emerald-300 text-sm font-medium">Demo settlement complete</p>
+          <p className="text-emerald-200/70 text-xs mt-1">Reference: {result.reference}</p>
+        </div>
+      )}
+    </GlassCard>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Page: NFT Lock (simulated — no App Kit capability covers this)      */
 /* ------------------------------------------------------------------ */
 
@@ -3709,6 +3933,7 @@ export default function ArcTestnetDApp() {
       case "Swap": return <SwapPage wallet={effectiveWallet} />;
       case "Bridge": return <BridgePage wallet={effectiveWallet} />;
       case "Lending": return <LendingPage wallet={effectiveWallet} />;
+      case "Off-Ramp": return <OffRampPage wallet={effectiveWallet} />;
       case "NFT Lock": return <NFTLockPage wallet={effectiveWallet} />;
       case "Activity": return <ActivityPage />;
       case "History": return <HistoryPage wallet={effectiveWallet} />;
