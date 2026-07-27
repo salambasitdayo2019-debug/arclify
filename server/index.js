@@ -18,6 +18,7 @@ import swapRoute from "./swapRoute.js";
 import authRoute from "./authRoute.js";
 import circleWalletsRoute from "./circleWalletsRoute.js";
 import bridgeRoute from "./bridgeRoute.js";
+import offRampRoute from "./offRampRoute.js";
 
 dotenv.config();
 
@@ -52,6 +53,7 @@ app.use("/api", swapRoute);
 app.use("/api", authRoute);
 app.use("/api", circleWalletsRoute);
 app.use("/api", bridgeRoute);
+app.use("/api", offRampRoute);
 
 // Fallback error handler so a thrown error doesn't crash the process
 app.use((err, _req, res, _next) => {
