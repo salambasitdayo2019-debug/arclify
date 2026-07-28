@@ -332,6 +332,25 @@ const BRIDGE_SOURCE_CHAINS = {
   },
 };
 
+// Curated, not exhaustive — picked specifically because they don't gate
+// on holding mainnet ETH (several faucets we hit while testing Bridge
+// did, which is the exact friction this panel exists to avoid). Faucets
+// change often; if one stops working, the others are real fallbacks.
+const BRIDGE_GAS_FAUCETS = {
+  ETH_SEPOLIA: [
+    { name: "Google Cloud Web3 Faucet", url: "https://cloud.google.com/application/web3/faucet/ethereum/sepolia" },
+    { name: "Alchemy Faucet", url: "https://www.alchemy.com/faucets/ethereum-sepolia" },
+  ],
+  BASE_SEPOLIA: [
+    { name: "Coinbase Developer Platform Faucet", url: "https://portal.cdp.coinbase.com/products/faucet" },
+    { name: "Alchemy Faucet", url: "https://www.alchemy.com/faucets/base-sepolia" },
+  ],
+  AVAX_FUJI: [
+    { name: "Chainlink Faucet", url: "https://faucets.chain.link/fuji" },
+    { name: "Core Wallet Faucet", url: "https://core.app/tools/testnet-faucet/?subnet=c&token=c" },
+  ],
+};
+
 const CCTP = {
   ARC_TESTNET_DOMAIN,
   ARC_TESTNET_MESSAGE_TRANSMITTER: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
@@ -2398,12 +2417,30 @@ function BridgePage({ wallet }) {
         value={sourceKey}
         onChange={(e) => setSourceKey(e.target.value)}
         disabled={busy}
-        className="w-full mt-1 mb-4 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+        className="w-full mt-1 mb-3 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
       >
         {Object.entries(BRIDGE_SOURCE_CHAINS).map(([key, cfg]) => (
           <option key={key} value={key}>{cfg.label}</option>
         ))}
       </select>
+
+      <details className="mb-4 group">
+        <summary className="text-xs text-cyan-300/80 cursor-pointer select-none hover:text-cyan-300">
+          Need gas on {source.label}?
+        </summary>
+        <div className="mt-2 bg-white/5 border border-white/10 rounded-lg p-3">
+          <p className="text-white/40 text-[11px] mb-2">
+            Bridging needs a small amount of {source.chain.nativeCurrency.symbol} on {source.label} to pay gas for the approve/burn steps — separate from the USDC you're bridging. These faucets don't require holding mainnet ETH first:
+          </p>
+          <div className="flex flex-col gap-1">
+            {(BRIDGE_GAS_FAUCETS[sourceKey] || []).map((f) => (
+              <a key={f.url} href={f.url} target="_blank" rel="noreferrer" className="text-cyan-300 text-xs underline">
+                {f.name} →
+              </a>
+            ))}
+          </div>
+        </div>
+      </details>
 
       {needsCircleWalletSetup ? (
         <div className="mb-4 bg-cyan-950/30 border border-cyan-500/20 rounded-lg p-3">
