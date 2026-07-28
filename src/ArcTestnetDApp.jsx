@@ -1552,12 +1552,13 @@ function CommandBar({ wallet, onNavigate }) {
 
 const NAV_ITEMS = [
   "Dashboard",
+  "Deposit",
+  "Withdraw",
   "Transfer",
   "Bulk Transfer",
   "Swap",
   "Bridge",
   "Lending",
-  "Off-Ramp",
   "NFT Lock",
   "Activity",
   "History",
@@ -2796,7 +2797,7 @@ function OffRampPage({ wallet }) {
       if (!res.ok) throw new Error("Rate lookup failed.");
       setRate(await res.json());
     } catch (e) {
-      toast({ category: "Off-Ramp", tone: "bad", title: "Rate lookup failed", message: e.message });
+      toast({ category: "Withdraw", tone: "bad", title: "Rate lookup failed", message: e.message });
       setRate(null);
     } finally {
       setRateLoading(false);
@@ -2809,19 +2810,19 @@ function OffRampPage({ wallet }) {
 
   const handleCashOut = useCallback(async () => {
     if (!wallet.address) {
-      toast({ category: "Off-Ramp", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      toast({ category: "Withdraw", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
     if (!amount || Number(amount) <= 0) {
-      toast({ category: "Off-Ramp", tone: "bad", title: "Invalid amount", message: "Enter an amount to cash out." });
+      toast({ category: "Withdraw", tone: "bad", title: "Invalid amount", message: "Enter an amount to withdraw." });
       return;
     }
     if (payoutMethod === "bank" && (!bankName || !accountNumber)) {
-      toast({ category: "Off-Ramp", tone: "bad", title: "Missing details", message: "Enter a bank name and account number." });
+      toast({ category: "Withdraw", tone: "bad", title: "Missing details", message: "Enter a bank name and account number." });
       return;
     }
     if (payoutMethod === "momo" && (!momoProvider || !phone)) {
-      toast({ category: "Off-Ramp", tone: "bad", title: "Missing details", message: "Enter a mobile money provider and phone number." });
+      toast({ category: "Withdraw", tone: "bad", title: "Missing details", message: "Enter a mobile money provider and phone number." });
       return;
     }
 
@@ -2867,27 +2868,22 @@ function OffRampPage({ wallet }) {
       setStep("settled");
       setResult({ ...data, localAmount });
       appendLog(`Settled — ref ${data.reference} (simulated).`);
-      toast({ category: "Off-Ramp", tone: "ok", title: "Cash out complete (demo)", message: `${localAmount} ${currency} — ${data.reference}` });
+      toast({ category: "Withdraw", tone: "ok", title: "Withdrawal complete (demo)", message: `${localAmount} ${currency} — ${data.reference}` });
     } catch (e) {
       setStep("error");
-      toast({ category: "Off-Ramp", tone: "bad", title: "Cash out failed", message: e.shortMessage || e.message });
+      toast({ category: "Withdraw", tone: "bad", title: "Withdrawal failed", message: e.shortMessage || e.message });
     }
   }, [wallet, token, amount, currency, payoutMethod, bankName, accountNumber, momoProvider, phone, localAmount]);
 
   return (
     <GlassCard className="p-6 max-w-lg">
-      <h2 className="text-white text-lg font-semibold mb-1">Off-Ramp</h2>
-      <p className="text-white/40 text-xs mb-3">
-        Cash out USDC/EURC to a bank account or mobile money — the "last mile" of a stablecoin product.
-      </p>
-      <div className="bg-amber-950/30 border border-amber-500/20 rounded-lg p-3 mb-4">
-        <p className="text-amber-200 text-xs font-medium mb-1">Prototype — partly real, partly simulated</p>
-        <p className="text-amber-200/70 text-[11px] leading-relaxed">
-          The exchange rate is live, and your {token} genuinely leaves your wallet on-chain. The bank/mobile
-          money payout itself is simulated — real settlement needs a licensed provider (e.g. HoneyCoin,
-          Eversend, Quidax), which needs a business account this testnet project doesn't have.
-        </p>
+      <div className="flex items-center gap-2 mb-1">
+        <h2 className="text-white text-lg font-semibold">Withdraw</h2>
+        <span className="text-[10px] uppercase tracking-wide bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded-full">Prototype</span>
       </div>
+      <p className="text-white/40 text-xs mb-4">
+        Turn USDC or EURC into money you can actually spend — straight to a bank account or mobile money.
+      </p>
 
       <div className="grid grid-cols-2 gap-3 mb-3">
         <div>
@@ -2949,7 +2945,7 @@ function OffRampPage({ wallet }) {
       )}
 
       <PrimaryButton disabled={busy} onClick={handleCashOut}>
-        {busy ? "Processing…" : "Cash Out"}
+        {busy ? "Processing…" : "Withdraw"}
       </PrimaryButton>
 
       {log.length > 0 && (
@@ -2968,7 +2964,309 @@ function OffRampPage({ wallet }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Page: NFT Lock (simulated — no App Kit capability covers this)      */
+/*  Page: Deposit (PROTOTYPE) — local currency -> USDC/EURC             */
+/*                                                                      */
+/*  The inbound counterpart to Withdraw. The exchange rate is real, and */
+/*  crediting is genuinely on-chain — a server-held treasury wallet     */
+/*  (server/offRampRoute.js, same pattern as Swap's signer wallet)      */
+/*  sends real testnet USDC/EURC once the (simulated) fiat payment      */
+/*  "clears." The fiat collection step itself is what's simulated —     */
+/*  actually collecting a bank transfer needs the same licensed-partner */
+/*  integration Withdraw's payout side would need.                      */
+/* ------------------------------------------------------------------ */
+
+const PAYSTACK_PUBLIC_KEY = import.meta?.env?.VITE_PAYSTACK_PUBLIC_KEY || "";
+
+function DepositPage({ wallet }) {
+  const [token, setToken] = useState("USDC");
+  const [currency, setCurrency] = useState("NGN");
+  const [localAmount, setLocalAmount] = useState("");
+  const [email, setEmail] = useState("");
+  const [fundingMethod, setFundingMethod] = useState("bank");
+  const [bankName, setBankName] = useState("");
+  const [reference, setReference] = useState("");
+  const [momoProvider, setMomoProvider] = useState("");
+  const [phone, setPhone] = useState("");
+
+  const [rate, setRate] = useState(null);
+  const [rateLoading, setRateLoading] = useState(false);
+  const [step, setStep] = useState("idle"); // idle | paying | converting | crediting | done | error
+  const [log, setLog] = useState([]);
+  const [result, setResult] = useState(null);
+  const busy = step !== "idle" && step !== "done" && step !== "error";
+  const isPaystackFlow = currency === "NGN";
+
+  const appendLog = (line) => setLog((l) => [...l, line]);
+
+  // Paystack's inline checkout is a plain script tag, not an npm
+  // package — load it once, lazily, only when it's actually needed.
+  useEffect(() => {
+    if (!isPaystackFlow || window.PaystackPop) return;
+    const script = document.createElement("script");
+    script.src = "https://js.paystack.co/v1/inline.js";
+    script.async = true;
+    document.body.appendChild(script);
+  }, [isPaystackFlow]);
+
+  const fetchRate = useCallback(async () => {
+    setRateLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/offramp/rate?currency=${currency}`);
+      if (!res.ok) throw new Error("Rate lookup failed.");
+      setRate(await res.json());
+    } catch (e) {
+      toast({ category: "Deposit", tone: "bad", title: "Rate lookup failed", message: e.message });
+      setRate(null);
+    } finally {
+      setRateLoading(false);
+    }
+  }, [currency]);
+
+  useEffect(() => { fetchRate(); }, [fetchRate]);
+
+  // Inverse of Withdraw's math: local currency in, token out.
+  const tokenAmount = rate && localAmount ? (Number(localAmount) / rate.rate) : null;
+
+  // Real path: opens Paystack's actual checkout popup. Test-mode secret
+  // key = fake test-card money; live secret key = real Naira — same
+  // code either way, Paystack switches behavior based on which key the
+  // backend holds.
+  const handlePaystackDeposit = useCallback(() => {
+    if (!wallet.address) {
+      toast({ category: "Deposit", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      return;
+    }
+    if (!localAmount || Number(localAmount) <= 0) {
+      toast({ category: "Deposit", tone: "bad", title: "Invalid amount", message: "Enter an amount to fund." });
+      return;
+    }
+    if (!email) {
+      toast({ category: "Deposit", tone: "bad", title: "Missing email", message: "Paystack needs an email for the receipt." });
+      return;
+    }
+    if (!window.PaystackPop) {
+      toast({ category: "Deposit", tone: "bad", title: "Not ready", message: "Payment popup is still loading — try again in a moment." });
+      return;
+    }
+    if (!PAYSTACK_PUBLIC_KEY) {
+      toast({ category: "Deposit", tone: "bad", title: "Not configured", message: "VITE_PAYSTACK_PUBLIC_KEY isn't set on the frontend yet." });
+      return;
+    }
+
+    setLog([]);
+    setResult(null);
+    setStep("paying");
+    appendLog("Opening Paystack checkout…");
+
+    const handler = window.PaystackPop.setup({
+      key: PAYSTACK_PUBLIC_KEY,
+      email,
+      amount: Math.round(Number(localAmount) * 100), // kobo
+      currency: "NGN",
+      callback: (response) => {
+        // Paystack confirms client-side here, but that's never trusted
+        // alone — the backend independently re-verifies against
+        // Paystack's own API before anything gets credited.
+        (async () => {
+          try {
+            setStep("converting");
+            appendLog(`Payment received by Paystack — verifying…`);
+            const verifyRes = await fetch(
+              `${API_BASE}/offramp/paystack/verify?reference=${encodeURIComponent(response.reference)}&toAddress=${wallet.address}&token=${token}`
+            );
+            const data = await verifyRes.json();
+            if (!verifyRes.ok) throw new Error(data.error || "Verification failed.");
+
+            setStep("crediting");
+            appendLog(`Verified — crediting your wallet on-chain…`);
+            appendLog(`On-chain — ${data.txHash.slice(0, 18)}… (real, verifiable on Arcscan)`);
+
+            setStep("done");
+            setResult({ reference: response.reference, txHash: data.txHash, tokenAmount: data.tokenAmount });
+            appendLog(`Done — ${data.tokenAmount.toFixed(4)} ${token} credited.`);
+            toast({ category: "Deposit", tone: "ok", title: "Deposit complete", message: `${data.tokenAmount.toFixed(4)} ${token} credited on-chain` });
+          } catch (e) {
+            setStep("error");
+            toast({ category: "Deposit", tone: "bad", title: "Deposit failed", message: e.message });
+          }
+        })();
+      },
+      onClose: () => {
+        if (step === "paying") {
+          setStep("idle");
+          appendLog("Checkout closed before completing.");
+        }
+      },
+    });
+    handler.openIframe();
+  }, [wallet, localAmount, email, token, step]);
+
+  // Simulated path — KES/GHS only, no real Paystack-equivalent wired up
+  // for those yet.
+  const handleSimulatedDeposit = useCallback(async () => {
+    if (!wallet.address) {
+      toast({ category: "Deposit", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      return;
+    }
+    if (!localAmount || Number(localAmount) <= 0) {
+      toast({ category: "Deposit", tone: "bad", title: "Invalid amount", message: "Enter an amount to fund." });
+      return;
+    }
+    if (fundingMethod === "bank" && (!bankName || !reference)) {
+      toast({ category: "Deposit", tone: "bad", title: "Missing details", message: "Enter a bank name and payment reference." });
+      return;
+    }
+    if (fundingMethod === "momo" && (!momoProvider || !phone)) {
+      toast({ category: "Deposit", tone: "bad", title: "Missing details", message: "Enter a mobile money provider and phone number." });
+      return;
+    }
+
+    setLog([]);
+    setResult(null);
+    try {
+      setStep("paying");
+      const accountLabel = fundingMethod === "bank" ? `${bankName} · ref ${reference}` : `${momoProvider} ${phone}`;
+      appendLog(`Waiting for ${currency} payment via ${accountLabel} (simulated)…`);
+      await new Promise((r) => setTimeout(r, 1200));
+
+      setStep("converting");
+      appendLog(`Converting to ${token} at today's rate…`);
+      const confirmRes = await fetch(`${API_BASE}/offramp/simulate-deposit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ localAmount, currency, token, fundingMethod, accountLabel }),
+      });
+      const confirmData = await confirmRes.json();
+      await new Promise((r) => setTimeout(r, 600));
+
+      setStep("crediting");
+      appendLog(`Crediting your wallet on-chain…`);
+      const creditRes = await fetch(`${API_BASE}/offramp/credit-deposit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ toAddress: wallet.address, token, localAmount, currency }),
+      });
+      const creditData = await creditRes.json();
+      if (!creditRes.ok) throw new Error(creditData.error || "Crediting failed.");
+      appendLog(`On-chain — ${creditData.txHash.slice(0, 18)}… (real, verifiable on Arcscan)`);
+
+      setStep("done");
+      setResult({ reference: confirmData.reference, txHash: creditData.txHash, tokenAmount: creditData.tokenAmount });
+      appendLog(`Done — ${creditData.tokenAmount.toFixed(4)} ${token} credited.`);
+      toast({ category: "Deposit", tone: "ok", title: "Deposit complete", message: `${creditData.tokenAmount.toFixed(4)} ${token} credited on-chain` });
+    } catch (e) {
+      setStep("error");
+      toast({ category: "Deposit", tone: "bad", title: "Deposit failed", message: e.shortMessage || e.message });
+    }
+  }, [wallet, token, localAmount, currency, fundingMethod, bankName, reference, momoProvider, phone]);
+
+  return (
+    <GlassCard className="p-6 max-w-lg">
+      <div className="flex items-center gap-2 mb-1">
+        <h2 className="text-white text-lg font-semibold">Deposit</h2>
+        <span className="text-[10px] uppercase tracking-wide bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded-full">
+          {isPaystackFlow ? "Real payment (test mode)" : "Prototype"}
+        </span>
+      </div>
+      <p className="text-white/40 text-xs mb-4">
+        Fund your wallet with Naira, Shillings, or Cedis — just like topping up a mobile money or exchange wallet.
+      </p>
+
+      <div className="grid grid-cols-2 gap-3 mb-3">
+        <div>
+          <label className="text-white/50 text-xs">You'll receive</label>
+          <select value={token} onChange={(e) => setToken(e.target.value)} disabled={busy}
+            className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm">
+            <option value="USDC">USDC</option>
+            <option value="EURC">EURC</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-white/50 text-xs">Fund with</label>
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)} disabled={busy}
+            className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm">
+            {Object.entries(OFFRAMP_CURRENCIES).map(([code, name]) => (
+              <option key={code} value={code}>{code} — {name}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <label className="text-white/50 text-xs">Amount ({currency})</label>
+      <input value={localAmount} onChange={(e) => setLocalAmount(e.target.value)} placeholder="0.00" disabled={busy}
+        className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white" />
+
+      <p className="text-xs text-white/40 mb-4">
+        {rateLoading ? "Fetching live rate…" : rate
+          ? `1 USD = ${rate.rate.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${rate.currency} (live, updated ${new Date(rate.asOf).toLocaleDateString()})`
+          : "Rate unavailable"}
+        {tokenAmount && <span className="text-cyan-300"> — you'll get ≈ {tokenAmount.toFixed(4)} {token}</span>}
+      </p>
+
+      {isPaystackFlow ? (
+        <>
+          <label className="text-white/50 text-xs">Email (for Paystack's receipt)</label>
+          <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" disabled={busy}
+            className="w-full mt-1 mb-4 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+        </>
+      ) : (
+        <>
+          <label className="text-white/50 text-xs">Funding method</label>
+          <div className="flex gap-2 mt-1 mb-3">
+            <button onClick={() => setFundingMethod("bank")} disabled={busy}
+              className={`flex-1 text-sm py-2 rounded-lg border ${fundingMethod === "bank" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-white/5 border-white/10 text-white/50"}`}>
+              Bank Transfer
+            </button>
+            <button onClick={() => setFundingMethod("momo")} disabled={busy}
+              className={`flex-1 text-sm py-2 rounded-lg border ${fundingMethod === "momo" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-white/5 border-white/10 text-white/50"}`}>
+              Mobile Money
+            </button>
+          </div>
+
+          {fundingMethod === "bank" ? (
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <input value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="Bank name" disabled={busy}
+                className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+              <input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Payment reference" disabled={busy}
+                className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <input value={momoProvider} onChange={(e) => setMomoProvider(e.target.value)} placeholder="Provider (e.g. M-Pesa)" disabled={busy}
+                className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+              <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone number" disabled={busy}
+                className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+            </div>
+          )}
+        </>
+      )}
+
+      <PrimaryButton disabled={busy} onClick={isPaystackFlow ? handlePaystackDeposit : handleSimulatedDeposit}>
+        {busy ? "Processing…" : isPaystackFlow ? "Pay with Paystack" : "Fund Wallet"}
+      </PrimaryButton>
+
+      {log.length > 0 && (
+        <div className="mt-4 space-y-1">
+          {log.map((line, i) => <p key={i} className="text-white/60 text-xs font-mono">{line}</p>)}
+        </div>
+      )}
+      {result && step === "done" && (
+        <div className="mt-3 bg-emerald-950/30 border border-emerald-500/20 rounded-lg p-3">
+          <p className="text-emerald-300 text-sm font-medium">Deposit complete</p>
+          <p className="text-emerald-200/70 text-xs mt-1">Payment ref (demo): {result.reference}</p>
+          <a
+            href={`${ARC_TESTNET.blockExplorerUrls[0]}/tx/${result.txHash}`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-cyan-300 text-xs underline"
+          >
+            View on-chain credit on Arcscan →
+          </a>
+        </div>
+      )}
+    </GlassCard>
+  );
+}
 /* ------------------------------------------------------------------ */
 
 // Local index of which lockIds belong to this browser, so we know which
@@ -3217,7 +3515,7 @@ function NFTLockPage({ wallet }) {
 /*  stay separate and serve different questions.                        */
 /* ------------------------------------------------------------------ */
 
-const ACTIVITY_CATEGORIES = ["All", "Transfer", "Bulk Transfer", "Swap", "Bridge", "Lending", "NFT Lock", "Command"];
+const ACTIVITY_CATEGORIES = ["All", "Deposit", "Withdraw", "Transfer", "Bulk Transfer", "Swap", "Bridge", "Lending", "NFT Lock", "Command"];
 
 function relativeTime(timestamp) {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
@@ -3933,7 +4231,8 @@ export default function ArcTestnetDApp() {
       case "Swap": return <SwapPage wallet={effectiveWallet} />;
       case "Bridge": return <BridgePage wallet={effectiveWallet} />;
       case "Lending": return <LendingPage wallet={effectiveWallet} />;
-      case "Off-Ramp": return <OffRampPage wallet={effectiveWallet} />;
+      case "Deposit": return <DepositPage wallet={effectiveWallet} />;
+      case "Withdraw": return <OffRampPage wallet={effectiveWallet} />;
       case "NFT Lock": return <NFTLockPage wallet={effectiveWallet} />;
       case "Activity": return <ActivityPage />;
       case "History": return <HistoryPage wallet={effectiveWallet} />;
