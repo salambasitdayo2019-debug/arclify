@@ -1,1 +1,46 @@
 @import "tailwindcss";
+
+:root {
+  --bg-base: #0B0A16;
+  --bg-grad-1: rgba(124, 58, 237, 0.25);
+  --bg-grad-2: rgba(34, 211, 238, 0.15);
+  --card-solid: #161226;
+  --surface-subtle: rgba(255, 255, 255, 0.05);
+  --surface: rgba(255, 255, 255, 0.10);
+  --border-subtle: rgba(255, 255, 255, 0.05);
+  --border: rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --text-primary: #FFFFFF;
+  --text-strong: rgba(255, 255, 255, 0.80);
+  --text-soft: rgba(255, 255, 255, 0.70);
+  --text-tertiary: rgba(255, 255, 255, 0.60);
+  --text-secondary: rgba(255, 255, 255, 0.50);
+  --text-muted: rgba(255, 255, 255, 0.40);
+  --text-faint: rgba(255, 255, 255, 0.30);
+}
+
+[data-theme="light"] {
+  --bg-base: #F6F4FB;
+  --bg-grad-1: rgba(124, 58, 237, 0.10);
+  --bg-grad-2: rgba(34, 211, 238, 0.10);
+  --card-solid: #FFFFFF;
+  --surface-subtle: rgba(15, 11, 31, 0.035);
+  --surface: rgba(15, 11, 31, 0.06);
+  --border-subtle: rgba(15, 11, 31, 0.06);
+  --border: rgba(15, 11, 31, 0.12);
+  --border-strong: rgba(15, 11, 31, 0.18);
+  --text-primary: #14101F;
+  --text-strong: rgba(20, 16, 31, 0.85);
+  --text-soft: rgba(20, 16, 31, 0.72);
+  --text-tertiary: rgba(20, 16, 31, 0.62);
+  --text-secondary: rgba(20, 16, 31, 0.55);
+  --text-muted: rgba(20, 16, 31, 0.48);
+  --text-faint: rgba(20, 16, 31, 0.38);
+}
+
+/* Visible focus ring for keyboard navigation — accessibility pass */
+:focus-visible {
+  outline: 2px solid #22D3EE;
+  outline-offset: 2px;
+  border-radius: 4px;
+}

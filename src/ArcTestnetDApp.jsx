@@ -6,6 +6,51 @@ import { useInjectedWallets } from "./wallet/eip6963";
 import { getWalletConnectProvider } from "./wallet/walletConnectProvider";
 
 /* ------------------------------------------------------------------ */
+/*  Error boundary — catches render-time errors anywhere in the app     */
+/*  and shows a recoverable screen instead of a blank white page. Has   */
+/*  to be a class component; React doesn't offer a hook for this.       */
+/* ------------------------------------------------------------------ */
+
+export class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("Arclify crashed:", error, info);
+  }
+
+  render() {
+    if (!this.state.hasError) return this.props.children;
+    return (
+      <div
+        data-theme={typeof window !== "undefined" ? localStorage.getItem("arc_theme") || "dark" : "dark"}
+        className="min-h-screen flex items-center justify-center p-6 bg-[var(--bg-base)] bg-[radial-gradient(circle_at_20%_0%,var(--bg-grad-1),transparent_45%),radial-gradient(circle_at_80%_100%,var(--bg-grad-2),transparent_40%)]"
+      >
+        <div className="max-w-md w-full rounded-2xl border border-[var(--border)] bg-[var(--surface-subtle)] backdrop-blur-xl p-8 text-center">
+          <img src="/favicon.svg" alt="Arclify" className="w-10 h-10 mx-auto mb-4" />
+          <h1 className="text-[var(--text-primary)] text-lg font-semibold mb-2">Something went wrong</h1>
+          <p className="text-[var(--text-secondary)] text-sm mb-6">
+            Arclify hit an unexpected error. Reloading usually fixes it — if it keeps happening, the error is logged in your browser console.
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-5 py-2.5 rounded-xl font-medium text-sm bg-gradient-to-r from-cyan-500 to-purple-600 text-white hover:brightness-110 transition"
+          >
+            Reload
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Arc Testnet config                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -1086,7 +1131,7 @@ function useCircleWallet() {
 
 const GlassCard = ({ children, className = "" }) => (
   <div
-    className={`rounded-2xl border border-purple-500/20 bg-white/5 backdrop-blur-xl shadow-[0_0_40px_-15px_rgba(168,85,247,0.35)] ${className}`}
+    className={`rounded-2xl border border-purple-500/20 bg-[var(--surface-subtle)] backdrop-blur-xl shadow-[0_0_40px_-15px_rgba(168,85,247,0.35)] ${className}`}
   >
     {children}
   </div>
@@ -1098,8 +1143,8 @@ const PrimaryButton = ({ children, disabled, ...props }) => (
     className={`px-5 py-2.5 rounded-xl font-medium text-sm transition border
       ${
         disabled
-          ? "bg-white/10 text-white/50 border-white/15 cursor-not-allowed"
-          : "bg-gradient-to-r from-cyan-500 to-purple-600 text-white border-transparent hover:brightness-110 active:scale-[0.98]"
+          ? "bg-[var(--surface)] text-[var(--text-secondary)] border-[var(--border-strong)] cursor-not-allowed"
+          : "bg-gradient-to-r from-cyan-500 to-purple-600 text-[var(--text-primary)] border-transparent hover:brightness-110 active:scale-[0.98]"
       }`}
     {...props}
   >
@@ -1109,7 +1154,7 @@ const PrimaryButton = ({ children, disabled, ...props }) => (
 
 const Pill = ({ tone = "neutral", children }) => {
   const tones = {
-    neutral: "bg-white/10 text-white/70",
+    neutral: "bg-[var(--surface)] text-[var(--text-soft)]",
     ok: "bg-emerald-500/15 text-emerald-300",
     warn: "bg-amber-500/15 text-amber-300",
     bad: "bg-rose-500/15 text-rose-300",
@@ -1123,7 +1168,7 @@ const Pill = ({ tone = "neutral", children }) => {
 
 // Simple animated placeholder bar shown while a value is still loading.
 const Skeleton = ({ className = "" }) => (
-  <div className={`animate-pulse rounded-md bg-white/10 ${className}`} />
+  <div className={`animate-pulse rounded-md bg-[var(--surface)] ${className}`} />
 );
 
 function CopyButton({ value, className = "" }) {
@@ -1150,12 +1195,13 @@ function CopyButton({ value, className = "" }) {
     <button
       onClick={handleCopy}
       title="Copy to clipboard"
-      className={`inline-flex items-center gap-1 text-white/40 hover:text-white/80 transition ${className}`}
+      aria-label="Copy to clipboard"
+      className={`inline-flex items-center gap-1 text-[var(--text-muted)] hover:text-[var(--text-strong)] transition ${className}`}
     >
       {copied ? (
         <span className="text-emerald-300 text-xs">Copied!</span>
       ) : (
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
           <rect x="9" y="9" width="13" height="13" rx="2" />
           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
         </svg>
@@ -1226,7 +1272,7 @@ function ToastViewport() {
     ok: "border-emerald-500/30 bg-emerald-950/80",
     bad: "border-rose-500/30 bg-rose-950/80",
     warn: "border-amber-500/30 bg-amber-950/80",
-    neutral: "border-white/10 bg-[#161226]/90",
+    neutral: "border-[var(--border)] bg-[var(--card-solid)]/90",
   };
 
   return (
@@ -1236,8 +1282,8 @@ function ToastViewport() {
           key={t.id}
           className={`rounded-xl border ${toneStyles[t.tone] || toneStyles.neutral} backdrop-blur-xl px-4 py-3 shadow-lg animate-[fadeIn_0.15s_ease-out]`}
         >
-          {t.title && <p className="text-white text-sm font-medium mb-0.5">{t.title}</p>}
-          {t.message && <p className="text-white/60 text-xs break-all">{t.message}</p>}
+          {t.title && <p className="text-[var(--text-primary)] text-sm font-medium mb-0.5">{t.title}</p>}
+          {t.message && <p className="text-[var(--text-tertiary)] text-xs break-all">{t.message}</p>}
           {t.action && (
             <button
               onClick={() => {
@@ -1495,20 +1541,21 @@ function CommandBar({ wallet, onNavigate }) {
     <>
       <button
         onClick={() => setOpen(true)}
-        className="fixed bottom-4 left-4 z-40 w-12 h-12 rounded-full bg-gradient-to-br from-cyan-400 to-purple-600 flex items-center justify-center text-white text-lg shadow-lg hover:scale-105 transition"
+        className="fixed bottom-4 left-4 z-40 w-12 h-12 rounded-full bg-gradient-to-br from-cyan-400 to-purple-600 flex items-center justify-center text-[var(--text-primary)] text-lg shadow-lg hover:scale-105 transition"
         title="Quick command"
+        aria-label="Open quick command bar"
       >
-        ⚡
+        <span aria-hidden="true">⚡</span>
       </button>
 
       {open && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
           <GlassCard className="w-full max-w-md p-6">
             <div className="flex items-center justify-between mb-1">
-              <h3 className="text-white text-base font-semibold">Quick command</h3>
-              <button onClick={reset} className="text-white/40 hover:text-white/70 text-sm">✕</button>
+              <h3 className="text-[var(--text-primary)] text-base font-semibold">Quick command</h3>
+              <button onClick={reset} aria-label="Close command bar" className="text-[var(--text-muted)] hover:text-[var(--text-soft)] text-sm">✕</button>
             </div>
-            <p className="text-white/40 text-xs mb-3">
+            <p className="text-[var(--text-muted)] text-xs mb-3">
               Type an instruction in plain English — no need to open the matching page.
             </p>
 
@@ -1518,7 +1565,7 @@ function CommandBar({ wallet, onNavigate }) {
               onChange={(e) => { setText(e.target.value); setParsed(null); setError(null); }}
               onKeyDown={(e) => e.key === "Enter" && (parsed ? runCommand() : handleParse())}
               placeholder="send 20 USDC to 0x..."
-              className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm mb-3"
+              className="w-full bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm mb-3"
             />
 
             {!parsed && (
@@ -1529,8 +1576,8 @@ function CommandBar({ wallet, onNavigate }) {
 
             {parsed && (
               <div className="mb-3 px-3 py-3 rounded-lg border border-cyan-500/30 bg-cyan-950/30">
-                <p className="text-white/50 text-xs mb-1">This will:</p>
-                <p className="text-white text-sm font-medium mb-3">{describeCommand(parsed)}</p>
+                <p className="text-[var(--text-secondary)] text-xs mb-1">This will:</p>
+                <p className="text-[var(--text-primary)] text-sm font-medium mb-3">{describeCommand(parsed)}</p>
                 <div className="flex gap-2">
                   <PrimaryButton onClick={runCommand} disabled={running} className="flex-1">
                     {running ? "Running…" : "Confirm"}
@@ -1538,7 +1585,7 @@ function CommandBar({ wallet, onNavigate }) {
                   <button
                     onClick={() => setParsed(null)}
                     disabled={running}
-                    className="px-4 py-2 rounded-lg text-white/60 text-sm border border-white/10 hover:bg-white/5"
+                    className="px-4 py-2 rounded-lg text-[var(--text-tertiary)] text-sm border border-[var(--border)] hover:bg-[var(--surface-subtle)]"
                   >
                     Cancel
                   </button>
@@ -1548,8 +1595,8 @@ function CommandBar({ wallet, onNavigate }) {
 
             {error && <p className="text-rose-300 text-xs mb-3">{error}</p>}
 
-            <div className="border-t border-white/5 pt-3">
-              <p className="text-white/40 text-xs mb-2">Try phrases like:</p>
+            <div className="border-t border-[var(--border-subtle)] pt-3">
+              <p className="text-[var(--text-muted)] text-xs mb-2">Try phrases like:</p>
               <div className="space-y-1">
                 {COMMAND_EXAMPLES.map((ex) => (
                   <button
@@ -1671,15 +1718,15 @@ function DashboardPage({ wallet }) {
       <GlassCard className="p-8 md:p-10">
         <div className="flex items-start justify-between flex-wrap gap-4">
           <div>
-            <p className="text-white/50 text-sm mb-2">Total balance</p>
+            <p className="text-[var(--text-secondary)] text-sm mb-2">Total balance</p>
             {total === null ? (
               <Skeleton className="h-12 sm:h-14 md:h-16 w-64 max-w-full" />
             ) : (
-              <p className="text-white text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight tabular-nums break-all">
+              <p className="text-[var(--text-primary)] text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight tabular-nums break-all">
                 {`$${total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               </p>
             )}
-            <p className="text-white/30 text-xs mt-2">Your USDC balance (1 USDC ≈ $1)</p>
+            <p className="text-[var(--text-faint)] text-xs mt-2">Your USDC balance (1 USDC ≈ $1)</p>
             {wallet.isCircleWallet && (
               <p className="text-cyan-300/70 text-xs mt-1">
                 Circle Wallet (email login) — Transfer, Swap, and NFT Lock all work here now.
@@ -1694,13 +1741,13 @@ function DashboardPage({ wallet }) {
               <button
                 onClick={() => setRefreshKey((k) => k + 1)}
                 disabled={loading}
-                className="text-white/40 text-xs hover:text-white/70 disabled:opacity-40 disabled:cursor-not-allowed underline decoration-dotted"
+                className="text-[var(--text-muted)] text-xs hover:text-[var(--text-soft)] disabled:opacity-40 disabled:cursor-not-allowed underline decoration-dotted"
               >
                 {loading ? "Refreshing…" : "Refresh"}
               </button>
             </div>
             <div className="flex items-center gap-2 justify-end">
-              <p className="text-white/40 font-mono text-xs break-all">
+              <p className="text-[var(--text-muted)] font-mono text-xs break-all">
                 {wallet.address ?? "Not connected"}
               </p>
               <CopyButton value={wallet.address} />
@@ -1713,41 +1760,41 @@ function DashboardPage({ wallet }) {
       <div className="grid sm:grid-cols-3 gap-4">
         <GlassCard className="p-6">
           <div className="flex items-center justify-between mb-5">
-            <span className="text-white/50 text-sm font-medium">USDC</span>
-            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-cyan-400 to-cyan-600 flex items-center justify-center text-xs font-bold text-white">
+            <span className="text-[var(--text-secondary)] text-sm font-medium">USDC</span>
+            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-cyan-400 to-cyan-600 flex items-center justify-center text-xs font-bold text-[var(--text-primary)]">
               $
             </span>
           </div>
           {balances.USDC === "—" ? (
             <Skeleton className="h-9 w-28" />
           ) : (
-            <p className="text-white text-3xl font-semibold tabular-nums">{balances.USDC}</p>
+            <p className="text-[var(--text-primary)] text-3xl font-semibold tabular-nums">{balances.USDC}</p>
           )}
         </GlassCard>
         <GlassCard className="p-6">
           <div className="flex items-center justify-between mb-5">
-            <span className="text-white/50 text-sm font-medium">EURC</span>
-            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-400 to-purple-600 flex items-center justify-center text-xs font-bold text-white">
+            <span className="text-[var(--text-secondary)] text-sm font-medium">EURC</span>
+            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-400 to-purple-600 flex items-center justify-center text-xs font-bold text-[var(--text-primary)]">
               €
             </span>
           </div>
           {balances.EURC === "—" ? (
             <Skeleton className="h-9 w-28" />
           ) : (
-            <p className="text-white text-3xl font-semibold tabular-nums">{balances.EURC}</p>
+            <p className="text-[var(--text-primary)] text-3xl font-semibold tabular-nums">{balances.EURC}</p>
           )}
         </GlassCard>
         <GlassCard className="p-6">
           <div className="flex items-center justify-between mb-5">
-            <span className="text-white/50 text-sm font-medium">cirBTC</span>
-            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-orange-400 to-orange-600 flex items-center justify-center text-xs font-bold text-white">
+            <span className="text-[var(--text-secondary)] text-sm font-medium">cirBTC</span>
+            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-orange-400 to-orange-600 flex items-center justify-center text-xs font-bold text-[var(--text-primary)]">
               ₿
             </span>
           </div>
           {balances.cirBTC === "—" ? (
             <Skeleton className="h-9 w-28" />
           ) : (
-            <p className="text-white text-3xl font-semibold tabular-nums">{balances.cirBTC}</p>
+            <p className="text-[var(--text-primary)] text-3xl font-semibold tabular-nums">{balances.cirBTC}</p>
           )}
         </GlassCard>
       </div>
@@ -1762,8 +1809,8 @@ function DashboardPage({ wallet }) {
 function CirclePhase2Notice({ feature }) {
   return (
     <GlassCard className="p-6 max-w-lg">
-      <h2 className="text-white text-lg font-semibold mb-2">{feature}</h2>
-      <p className="text-white/50 text-sm">
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-2">{feature}</h2>
+      <p className="text-[var(--text-secondary)] text-sm">
         {feature} isn't wired up for Circle Wallets (email login) yet — that's
         planned for a follow-up build. Sign in with MetaMask or WalletConnect
         instead to use this feature right now.
@@ -1839,35 +1886,35 @@ function TransferPage({ wallet }) {
 
   return (
     <GlassCard className="p-6 max-w-lg">
-      <h2 className="text-white text-lg font-semibold mb-4">Transfer</h2>
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-4">Transfer</h2>
       {wallet.isCircleWallet && (
         <p className="text-cyan-300/70 text-xs mb-3">
           Circle Wallet: sending USDC, EURC, or cirBTC — you'll confirm with your PIN.
         </p>
       )}
-      <label className="text-white/50 text-xs">Token</label>
+      <label className="text-[var(--text-secondary)] text-xs">Token</label>
       <select
         value={token}
         onChange={(e) => setToken(e.target.value)}
-        className="w-full mt-1 mb-3 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+        className="w-full mt-1 mb-3 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)]"
       >
         <option value="USDC">USDC</option>
         <option value="EURC">EURC</option>
         <option value="cirBTC">cirBTC</option>
       </select>
-      <label className="text-white/50 text-xs">Recipient address</label>
+      <label className="text-[var(--text-secondary)] text-xs">Recipient address</label>
       <input
         value={to}
         onChange={(e) => setTo(e.target.value)}
         placeholder="0x..."
-        className="w-full mt-1 mb-3 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white font-mono text-sm"
+        className="w-full mt-1 mb-3 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] font-mono text-sm"
       />
-      <label className="text-white/50 text-xs">Amount</label>
+      <label className="text-[var(--text-secondary)] text-xs">Amount</label>
       <input
         value={amount}
         onChange={(e) => setAmount(e.target.value)}
         placeholder="0.00"
-        className="w-full mt-1 mb-4 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+        className="w-full mt-1 mb-4 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)]"
       />
       <PrimaryButton onClick={handleSend} disabled={sending}>
         {sending ? "Sending…" : "Send"}
@@ -1928,11 +1975,11 @@ function BulkTransferPage({ wallet }) {
 
   return (
     <GlassCard className="p-6 max-w-2xl">
-      <h2 className="text-white text-lg font-semibold mb-4">Bulk Transfer</h2>
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-4">Bulk Transfer</h2>
       <select
         value={token}
         onChange={(e) => setToken(e.target.value)}
-        className="mb-3 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+        className="mb-3 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)]"
       >
         <option value="USDC">USDC</option>
         <option value="EURC">EURC</option>
@@ -1944,13 +1991,13 @@ function BulkTransferPage({ wallet }) {
             value={row.to}
             onChange={(e) => updateRow(i, "to", e.target.value)}
             placeholder="0x recipient"
-            className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white font-mono text-sm"
+            className="flex-1 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] font-mono text-sm"
           />
           <input
             value={row.amount}
             onChange={(e) => updateRow(i, "amount", e.target.value)}
             placeholder="Amount"
-            className="w-28 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+            className="w-28 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)]"
           />
         </div>
       ))}
@@ -1961,7 +2008,7 @@ function BulkTransferPage({ wallet }) {
         <PrimaryButton onClick={runBatch}>Send batch</PrimaryButton>
       </div>
       {log.length > 0 && (
-        <div className="mt-4 space-y-1 text-xs font-mono text-white/70">
+        <div className="mt-4 space-y-1 text-xs font-mono text-[var(--text-soft)]">
           {log.map((l, i) => (
             <p key={i}>{l}</p>
           ))}
@@ -2084,8 +2131,8 @@ function SwapPage({ wallet }) {
 
   return (
     <GlassCard className="p-6 max-w-lg">
-      <h2 className="text-white text-lg font-semibold mb-1">Swap</h2>
-      <p className="text-white/40 text-xs mb-4">
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-1">Swap</h2>
+      <p className="text-[var(--text-muted)] text-xs mb-4">
         Runs server-side via Circle App Kit — client-side Swap isn't available yet.
       </p>
 
@@ -2100,11 +2147,11 @@ function SwapPage({ wallet }) {
 
       <div className="flex gap-2 mb-3">
         <div className="flex-1">
-          <label className="text-white/50 text-xs">From</label>
+          <label className="text-[var(--text-secondary)] text-xs">From</label>
           <select
             value={tokenIn}
             onChange={(e) => setTokenIn(e.target.value)}
-            className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+            className="w-full mt-1 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)]"
           >
             {tokenOptions.map((t) => (
               <option key={t} value={t}>{t}</option>
@@ -2112,11 +2159,11 @@ function SwapPage({ wallet }) {
           </select>
         </div>
         <div className="flex-1">
-          <label className="text-white/50 text-xs">To</label>
+          <label className="text-[var(--text-secondary)] text-xs">To</label>
           <select
             value={tokenOut}
             onChange={(e) => setTokenOut(e.target.value)}
-            className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+            className="w-full mt-1 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)]"
           >
             {tokenOptions.map((t) => (
               <option key={t} value={t}>{t}</option>
@@ -2125,20 +2172,20 @@ function SwapPage({ wallet }) {
         </div>
       </div>
 
-      <label className="text-white/50 text-xs">Amount in</label>
+      <label className="text-[var(--text-secondary)] text-xs">Amount in</label>
       <input
         value={amountIn}
         onChange={(e) => setAmountIn(e.target.value)}
         placeholder="0.00"
-        className="w-full mt-1 mb-3 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+        className="w-full mt-1 mb-3 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)]"
       />
 
-      <label className="text-white/50 text-xs">Slippage (bps)</label>
+      <label className="text-[var(--text-secondary)] text-xs">Slippage (bps)</label>
       <input
         type="number"
         value={slippageBps}
         onChange={(e) => setSlippageBps(Number(e.target.value))}
-        className="w-full mt-1 mb-4 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+        className="w-full mt-1 mb-4 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)]"
       />
 
       <div className="flex gap-2">
@@ -2151,7 +2198,7 @@ function SwapPage({ wallet }) {
       </div>
 
       {estimate && (
-        <div className="mt-4 text-sm text-white/70 space-y-1">
+        <div className="mt-4 text-sm text-[var(--text-soft)] space-y-1">
           <p>Estimated output: <span className="font-mono">{estimate.estimatedOutput?.amount} {estimate.estimatedOutput?.token}</span></p>
           <p>Guaranteed minimum: <span className="font-mono">{estimate.stopLimit?.amount} {estimate.stopLimit?.token}</span></p>
         </div>
@@ -2402,8 +2449,8 @@ function BridgePage({ wallet }) {
 
   return (
     <GlassCard className="p-6 max-w-lg">
-      <h2 className="text-white text-lg font-semibold mb-1">Bridge</h2>
-      <p className="text-white/40 text-xs mb-4">
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-1">Bridge</h2>
+      <p className="text-[var(--text-muted)] text-xs mb-4">
         Move USDC in from another testnet via Circle's CCTP — a real burn on
         the source chain and a fresh native mint on Arc, not a wrapped
         token.{" "}
@@ -2412,12 +2459,12 @@ function BridgePage({ wallet }) {
           : "Your wallet will prompt you to switch networks twice (source chain to burn, Arc to mint)."}
       </p>
 
-      <label className="text-white/50 text-xs">From</label>
+      <label className="text-[var(--text-secondary)] text-xs">From</label>
       <select
         value={sourceKey}
         onChange={(e) => setSourceKey(e.target.value)}
         disabled={busy}
-        className="w-full mt-1 mb-3 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+        className="w-full mt-1 mb-3 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
       >
         {Object.entries(BRIDGE_SOURCE_CHAINS).map(([key, cfg]) => (
           <option key={key} value={key}>{cfg.label}</option>
@@ -2428,8 +2475,8 @@ function BridgePage({ wallet }) {
         <summary className="text-xs text-cyan-300/80 cursor-pointer select-none hover:text-cyan-300">
           Need gas on {source.label}?
         </summary>
-        <div className="mt-2 bg-white/5 border border-white/10 rounded-lg p-3">
-          <p className="text-white/40 text-[11px] mb-2">
+        <div className="mt-2 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg p-3">
+          <p className="text-[var(--text-muted)] text-[11px] mb-2">
             Bridging needs a small amount of {source.chain.nativeCurrency.symbol} on {source.label} to pay gas for the approve/burn steps — separate from the USDC you're bridging. These faucets don't require holding mainnet ETH first:
           </p>
           <div className="flex flex-col gap-1">
@@ -2454,7 +2501,7 @@ function BridgePage({ wallet }) {
       ) : (
         <>
           {wallet.isCircleWallet && circleSourceWallet && (
-            <p className="text-white/40 text-[11px] mb-3 break-all">
+            <p className="text-[var(--text-muted)] text-[11px] mb-3 break-all">
               Your {source.label} wallet: <span className="font-mono">{circleSourceWallet.address}</span>
               {" — "}
               <a
@@ -2467,13 +2514,13 @@ function BridgePage({ wallet }) {
               </a>
             </p>
           )}
-          <label className="text-white/50 text-xs">Amount (USDC on {source.label})</label>
+          <label className="text-[var(--text-secondary)] text-xs">Amount (USDC on {source.label})</label>
           <input
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
             placeholder="0.00"
             disabled={busy}
-            className="w-full mt-1 mb-4 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white"
+            className="w-full mt-1 mb-4 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)]"
           />
 
           <PrimaryButton disabled={busy} onClick={runBridge}>
@@ -2485,7 +2532,7 @@ function BridgePage({ wallet }) {
       {log.length > 0 && (
         <div className="mt-4 space-y-1">
           {log.map((line, i) => (
-            <p key={i} className="text-white/60 text-xs font-mono">{line}</p>
+            <p key={i} className="text-[var(--text-tertiary)] text-xs font-mono">{line}</p>
           ))}
         </div>
       )}
@@ -2663,8 +2710,8 @@ function LendingPage({ wallet }) {
 
   return (
     <GlassCard className="p-6 max-w-lg">
-      <h2 className="text-white text-lg font-semibold mb-1">Lending</h2>
-      <p className="text-white/40 text-xs mb-4">
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-1">Lending</h2>
+      <p className="text-[var(--text-muted)] text-xs mb-4">
         Deposit USDC as collateral, borrow EURC against it. Fixed exchange
         rate (not a live oracle) and fixed interest — a starting point, not
         a production money market. Contract:{" "}
@@ -2685,21 +2732,21 @@ function LendingPage({ wallet }) {
 
       {account && (
         <div className="grid grid-cols-2 gap-3 mb-5 text-sm">
-          <div className="bg-white/5 rounded-lg p-3">
-            <p className="text-white/40 text-xs">Your collateral</p>
-            <p className="text-white font-medium">{Number(account.collateral).toFixed(4)} USDC</p>
+          <div className="bg-[var(--surface-subtle)] rounded-lg p-3">
+            <p className="text-[var(--text-muted)] text-xs">Your collateral</p>
+            <p className="text-[var(--text-primary)] font-medium">{Number(account.collateral).toFixed(4)} USDC</p>
           </div>
-          <div className="bg-white/5 rounded-lg p-3">
-            <p className="text-white/40 text-xs">Your debt</p>
-            <p className="text-white font-medium">{Number(account.debt).toFixed(4)} EURC</p>
+          <div className="bg-[var(--surface-subtle)] rounded-lg p-3">
+            <p className="text-[var(--text-muted)] text-xs">Your debt</p>
+            <p className="text-[var(--text-primary)] font-medium">{Number(account.debt).toFixed(4)} EURC</p>
           </div>
-          <div className="bg-white/5 rounded-lg p-3">
-            <p className="text-white/40 text-xs">Max borrowable</p>
-            <p className="text-white font-medium">{Number(account.maxBorrowable).toFixed(4)} EURC</p>
+          <div className="bg-[var(--surface-subtle)] rounded-lg p-3">
+            <p className="text-[var(--text-muted)] text-xs">Max borrowable</p>
+            <p className="text-[var(--text-primary)] font-medium">{Number(account.maxBorrowable).toFixed(4)} EURC</p>
           </div>
-          <div className="bg-white/5 rounded-lg p-3">
-            <p className="text-white/40 text-xs">Pool liquidity</p>
-            <p className="text-white font-medium">{Number(account.availableLiquidity).toFixed(2)} EURC</p>
+          <div className="bg-[var(--surface-subtle)] rounded-lg p-3">
+            <p className="text-[var(--text-muted)] text-xs">Pool liquidity</p>
+            <p className="text-[var(--text-primary)] font-medium">{Number(account.availableLiquidity).toFixed(2)} EURC</p>
           </div>
         </div>
       )}
@@ -2711,60 +2758,60 @@ function LendingPage({ wallet }) {
       )}
 
       {poolInfo && (
-        <p className="text-white/30 text-[11px] mb-5">
+        <p className="text-[var(--text-faint)] text-[11px] mb-5">
           Rate: 1 USDC = {poolInfo.exchangeRate.toFixed(4)} EURC · Max LTV {poolInfo.collateralFactorBps / 100}% · Liquidation at {poolInfo.liquidationThresholdBps / 100}% · {poolInfo.interestRateBps / 100}% APR
         </p>
       )}
 
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className="text-white/50 text-xs">Deposit collateral (USDC)</label>
+          <label className="text-[var(--text-secondary)] text-xs">Deposit collateral (USDC)</label>
           <input
             value={depositAmount}
             onChange={(e) => setDepositAmount(e.target.value)}
             placeholder="0.00"
             disabled={busy}
-            className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+            className="w-full mt-1 mb-2 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
           />
           <PrimaryButton disabled={busy} onClick={handleDeposit}>Deposit</PrimaryButton>
         </div>
         <div>
-          <label className="text-white/50 text-xs">Withdraw collateral (USDC)</label>
+          <label className="text-[var(--text-secondary)] text-xs">Withdraw collateral (USDC)</label>
           <input
             value={withdrawAmount}
             onChange={(e) => setWithdrawAmount(e.target.value)}
             placeholder="0.00"
             disabled={busy}
-            className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+            className="w-full mt-1 mb-2 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
           />
           <PrimaryButton disabled={busy} onClick={handleWithdraw}>Withdraw</PrimaryButton>
         </div>
         <div>
-          <label className="text-white/50 text-xs">Borrow (EURC)</label>
+          <label className="text-[var(--text-secondary)] text-xs">Borrow (EURC)</label>
           <input
             value={borrowAmount}
             onChange={(e) => setBorrowAmount(e.target.value)}
             placeholder="0.00"
             disabled={busy}
-            className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+            className="w-full mt-1 mb-2 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
           />
           <PrimaryButton disabled={busy} onClick={handleBorrow}>Borrow</PrimaryButton>
         </div>
         <div>
-          <label className="text-white/50 text-xs">Repay (EURC)</label>
+          <label className="text-[var(--text-secondary)] text-xs">Repay (EURC)</label>
           <input
             value={repayAmount}
             onChange={(e) => setRepayAmount(e.target.value)}
             placeholder="0.00"
             disabled={busy}
-            className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+            className="w-full mt-1 mb-2 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
           />
           <PrimaryButton disabled={busy} onClick={handleRepay}>Repay</PrimaryButton>
         </div>
       </div>
 
-      <div className="mt-6 pt-5 border-t border-white/10">
-        <p className="text-white/40 text-xs mb-2">
+      <div className="mt-6 pt-5 border-t border-[var(--border)]">
+        <p className="text-[var(--text-muted)] text-xs mb-2">
           Fund the pool — adds EURC that anyone can borrow against their collateral. No individual yield tracking yet for suppliers (known limitation for this first version).
         </p>
         <div className="flex gap-2">
@@ -2773,7 +2820,7 @@ function LendingPage({ wallet }) {
             onChange={(e) => setFundAmount(e.target.value)}
             placeholder="0.00"
             disabled={busy}
-            className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+            className="flex-1 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
           />
           <PrimaryButton disabled={busy} onClick={handleFundPool}>Fund Pool</PrimaryButton>
         </div>
@@ -2915,26 +2962,26 @@ function OffRampPage({ wallet }) {
   return (
     <GlassCard className="p-6 max-w-lg">
       <div className="flex items-center gap-2 mb-1">
-        <h2 className="text-white text-lg font-semibold">Withdraw</h2>
+        <h2 className="text-[var(--text-primary)] text-lg font-semibold">Withdraw</h2>
         <span className="text-[10px] uppercase tracking-wide bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded-full">Prototype</span>
       </div>
-      <p className="text-white/40 text-xs mb-4">
+      <p className="text-[var(--text-muted)] text-xs mb-4">
         Turn USDC or EURC into money you can actually spend — straight to a bank account or mobile money.
       </p>
 
       <div className="grid grid-cols-2 gap-3 mb-3">
         <div>
-          <label className="text-white/50 text-xs">Token</label>
+          <label className="text-[var(--text-secondary)] text-xs">Token</label>
           <select value={token} onChange={(e) => setToken(e.target.value)} disabled={busy}
-            className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm">
+            className="w-full mt-1 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm">
             <option value="USDC">USDC</option>
             <option value="EURC">EURC</option>
           </select>
         </div>
         <div>
-          <label className="text-white/50 text-xs">Payout currency</label>
+          <label className="text-[var(--text-secondary)] text-xs">Payout currency</label>
           <select value={currency} onChange={(e) => setCurrency(e.target.value)} disabled={busy}
-            className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm">
+            className="w-full mt-1 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm">
             {Object.entries(OFFRAMP_CURRENCIES).map(([code, name]) => (
               <option key={code} value={code}>{code} — {name}</option>
             ))}
@@ -2942,25 +2989,25 @@ function OffRampPage({ wallet }) {
         </div>
       </div>
 
-      <label className="text-white/50 text-xs">Amount ({token})</label>
+      <label className="text-[var(--text-secondary)] text-xs">Amount ({token})</label>
       <input value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" disabled={busy}
-        className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white" />
+        className="w-full mt-1 mb-2 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)]" />
 
-      <p className="text-xs text-white/40 mb-4">
+      <p className="text-xs text-[var(--text-muted)] mb-4">
         {rateLoading ? "Fetching live rate…" : rate
           ? `1 USD = ${rate.rate.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${rate.currency} (live, updated ${new Date(rate.asOf).toLocaleDateString()})`
           : "Rate unavailable"}
         {localAmount && <span className="text-cyan-300"> — you'll receive ≈ {localAmount} {currency}</span>}
       </p>
 
-      <label className="text-white/50 text-xs">Payout method</label>
+      <label className="text-[var(--text-secondary)] text-xs">Payout method</label>
       <div className="flex gap-2 mt-1 mb-3">
         <button onClick={() => setPayoutMethod("bank")} disabled={busy}
-          className={`flex-1 text-sm py-2 rounded-lg border ${payoutMethod === "bank" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-white/5 border-white/10 text-white/50"}`}>
+          className={`flex-1 text-sm py-2 rounded-lg border ${payoutMethod === "bank" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-[var(--surface-subtle)] border-[var(--border)] text-[var(--text-secondary)]"}`}>
           Bank Transfer
         </button>
         <button onClick={() => setPayoutMethod("momo")} disabled={busy}
-          className={`flex-1 text-sm py-2 rounded-lg border ${payoutMethod === "momo" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-white/5 border-white/10 text-white/50"}`}>
+          className={`flex-1 text-sm py-2 rounded-lg border ${payoutMethod === "momo" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-[var(--surface-subtle)] border-[var(--border)] text-[var(--text-secondary)]"}`}>
           Mobile Money
         </button>
       </div>
@@ -2968,16 +3015,16 @@ function OffRampPage({ wallet }) {
       {payoutMethod === "bank" ? (
         <div className="grid grid-cols-2 gap-3 mb-4">
           <input value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="Bank name" disabled={busy}
-            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+            className="bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm" />
           <input value={accountNumber} onChange={(e) => setAccountNumber(e.target.value)} placeholder="Account number" disabled={busy}
-            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+            className="bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm" />
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-3 mb-4">
           <input value={momoProvider} onChange={(e) => setMomoProvider(e.target.value)} placeholder="Provider (e.g. M-Pesa)" disabled={busy}
-            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+            className="bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm" />
           <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone number" disabled={busy}
-            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+            className="bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm" />
         </div>
       )}
 
@@ -2987,7 +3034,7 @@ function OffRampPage({ wallet }) {
 
       {log.length > 0 && (
         <div className="mt-4 space-y-1">
-          {log.map((line, i) => <p key={i} className="text-white/60 text-xs font-mono">{line}</p>)}
+          {log.map((line, i) => <p key={i} className="text-[var(--text-tertiary)] text-xs font-mono">{line}</p>)}
         </div>
       )}
       {result && step === "settled" && (
@@ -3200,28 +3247,28 @@ function DepositPage({ wallet }) {
   return (
     <GlassCard className="p-6 max-w-lg">
       <div className="flex items-center gap-2 mb-1">
-        <h2 className="text-white text-lg font-semibold">Deposit</h2>
+        <h2 className="text-[var(--text-primary)] text-lg font-semibold">Deposit</h2>
         <span className="text-[10px] uppercase tracking-wide bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded-full">
           {isPaystackFlow ? "Real payment (test mode)" : "Prototype"}
         </span>
       </div>
-      <p className="text-white/40 text-xs mb-4">
+      <p className="text-[var(--text-muted)] text-xs mb-4">
         Fund your wallet with Naira, Shillings, or Cedis — just like topping up a mobile money or exchange wallet.
       </p>
 
       <div className="grid grid-cols-2 gap-3 mb-3">
         <div>
-          <label className="text-white/50 text-xs">You'll receive</label>
+          <label className="text-[var(--text-secondary)] text-xs">You'll receive</label>
           <select value={token} onChange={(e) => setToken(e.target.value)} disabled={busy}
-            className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm">
+            className="w-full mt-1 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm">
             <option value="USDC">USDC</option>
             <option value="EURC">EURC</option>
           </select>
         </div>
         <div>
-          <label className="text-white/50 text-xs">Fund with</label>
+          <label className="text-[var(--text-secondary)] text-xs">Fund with</label>
           <select value={currency} onChange={(e) => setCurrency(e.target.value)} disabled={busy}
-            className="w-full mt-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm">
+            className="w-full mt-1 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm">
             {Object.entries(OFFRAMP_CURRENCIES).map(([code, name]) => (
               <option key={code} value={code}>{code} — {name}</option>
             ))}
@@ -3229,11 +3276,11 @@ function DepositPage({ wallet }) {
         </div>
       </div>
 
-      <label className="text-white/50 text-xs">Amount ({currency})</label>
+      <label className="text-[var(--text-secondary)] text-xs">Amount ({currency})</label>
       <input value={localAmount} onChange={(e) => setLocalAmount(e.target.value)} placeholder="0.00" disabled={busy}
-        className="w-full mt-1 mb-2 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white" />
+        className="w-full mt-1 mb-2 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)]" />
 
-      <p className="text-xs text-white/40 mb-4">
+      <p className="text-xs text-[var(--text-muted)] mb-4">
         {rateLoading ? "Fetching live rate…" : rate
           ? `1 USD = ${rate.rate.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${rate.currency} (live, updated ${new Date(rate.asOf).toLocaleDateString()})`
           : "Rate unavailable"}
@@ -3242,20 +3289,20 @@ function DepositPage({ wallet }) {
 
       {isPaystackFlow ? (
         <>
-          <label className="text-white/50 text-xs">Email (for Paystack's receipt)</label>
+          <label className="text-[var(--text-secondary)] text-xs">Email (for Paystack's receipt)</label>
           <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" disabled={busy}
-            className="w-full mt-1 mb-4 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+            className="w-full mt-1 mb-4 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm" />
         </>
       ) : (
         <>
-          <label className="text-white/50 text-xs">Funding method</label>
+          <label className="text-[var(--text-secondary)] text-xs">Funding method</label>
           <div className="flex gap-2 mt-1 mb-3">
             <button onClick={() => setFundingMethod("bank")} disabled={busy}
-              className={`flex-1 text-sm py-2 rounded-lg border ${fundingMethod === "bank" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-white/5 border-white/10 text-white/50"}`}>
+              className={`flex-1 text-sm py-2 rounded-lg border ${fundingMethod === "bank" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-[var(--surface-subtle)] border-[var(--border)] text-[var(--text-secondary)]"}`}>
               Bank Transfer
             </button>
             <button onClick={() => setFundingMethod("momo")} disabled={busy}
-              className={`flex-1 text-sm py-2 rounded-lg border ${fundingMethod === "momo" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-white/5 border-white/10 text-white/50"}`}>
+              className={`flex-1 text-sm py-2 rounded-lg border ${fundingMethod === "momo" ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200" : "bg-[var(--surface-subtle)] border-[var(--border)] text-[var(--text-secondary)]"}`}>
               Mobile Money
             </button>
           </div>
@@ -3263,16 +3310,16 @@ function DepositPage({ wallet }) {
           {fundingMethod === "bank" ? (
             <div className="grid grid-cols-2 gap-3 mb-4">
               <input value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="Bank name" disabled={busy}
-                className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+                className="bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm" />
               <input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Payment reference" disabled={busy}
-                className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+                className="bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm" />
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-3 mb-4">
               <input value={momoProvider} onChange={(e) => setMomoProvider(e.target.value)} placeholder="Provider (e.g. M-Pesa)" disabled={busy}
-                className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+                className="bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm" />
               <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone number" disabled={busy}
-                className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm" />
+                className="bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm" />
             </div>
           )}
         </>
@@ -3284,7 +3331,7 @@ function DepositPage({ wallet }) {
 
       {log.length > 0 && (
         <div className="mt-4 space-y-1">
-          {log.map((line, i) => <p key={i} className="text-white/60 text-xs font-mono">{line}</p>)}
+          {log.map((line, i) => <p key={i} className="text-[var(--text-tertiary)] text-xs font-mono">{line}</p>)}
         </div>
       )}
       {result && step === "done" && (
@@ -3471,8 +3518,8 @@ function NFTLockPage({ wallet }) {
 
   return (
     <GlassCard className="p-6 max-w-lg">
-      <h2 className="text-white text-lg font-semibold mb-1">NFT Lock</h2>
-      <p className="text-white/40 text-xs mb-4">
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-1">NFT Lock</h2>
+      <p className="text-[var(--text-muted)] text-xs mb-4">
         Real on-chain lock via a custom vault contract on Arc Testnet. Mint a free test NFT, then lock it for a chosen duration.
       </p>
       {wallet.isCircleWallet && (
@@ -3487,12 +3534,12 @@ function NFTLockPage({ wallet }) {
 
       {mintedIds.length > 0 && (
         <div className="mt-5">
-          <p className="text-white/50 text-xs mb-2">Unlocked NFTs you own — ready to lock</p>
+          <p className="text-[var(--text-secondary)] text-xs mb-2">Unlocked NFTs you own — ready to lock</p>
           <div className="flex items-center gap-2 mb-3">
             <select
               value={duration}
               onChange={(e) => setDuration(e.target.value)}
-              className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+              className="bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
             >
               <option value="test2min">2 minutes (testing)</option>
               <option value="7">7 days</option>
@@ -3502,7 +3549,7 @@ function NFTLockPage({ wallet }) {
           </div>
           <div className="space-y-2">
             {mintedIds.map((id) => (
-              <div key={id} className="flex justify-between items-center text-sm text-white/80 border-t border-white/5 pt-2">
+              <div key={id} className="flex justify-between items-center text-sm text-[var(--text-strong)] border-t border-[var(--border-subtle)] pt-2">
                 <span>Token #{id}</span>
                 <PrimaryButton disabled={busy} onClick={() => lockNft(id)}>Lock</PrimaryButton>
               </div>
@@ -3513,13 +3560,13 @@ function NFTLockPage({ wallet }) {
 
       {lockIds.length > 0 && (
         <div className="mt-5">
-          <p className="text-white/50 text-xs mb-2">Your locks</p>
+          <p className="text-[var(--text-secondary)] text-xs mb-2">Your locks</p>
           <div className="space-y-2">
             {lockIds.map((id) => {
               const d = lockDetails[id];
               return (
-                <div key={id} className="flex justify-between items-center text-sm border-t border-white/5 pt-2">
-                  <span className="text-white/80">
+                <div key={id} className="flex justify-between items-center text-sm border-t border-[var(--border-subtle)] pt-2">
+                  <span className="text-[var(--text-strong)]">
                     Lock #{id}{d ? ` — token #${d.tokenId}` : ""}
                   </span>
                   {d ? (
@@ -3587,14 +3634,14 @@ function ActivityPage() {
   return (
     <GlassCard className="p-6 max-w-2xl">
       <div className="flex items-center justify-between mb-1">
-        <h2 className="text-white text-lg font-semibold">Activity Centre</h2>
+        <h2 className="text-[var(--text-primary)] text-lg font-semibold">Activity Centre</h2>
         {entries.length > 0 && (
-          <button onClick={clearLog} className="text-white/40 hover:text-white/70 text-xs transition">
+          <button onClick={clearLog} className="text-[var(--text-muted)] hover:text-[var(--text-soft)] text-xs transition">
             Clear log
           </button>
         )}
       </div>
-      <p className="text-white/40 text-xs mb-4">
+      <p className="text-[var(--text-muted)] text-xs mb-4">
         Everything that's happened in this browser — transfers, swaps, bridges, lending, NFT lock actions. Kept locally, most recent first.
       </p>
 
@@ -3606,7 +3653,7 @@ function ActivityPage() {
             className={`text-xs px-3 py-1.5 rounded-full border transition ${
               filter === cat
                 ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-200"
-                : "bg-white/5 border-white/10 text-white/50 hover:text-white/80"
+                : "bg-[var(--surface-subtle)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-strong)]"
             }`}
           >
             {cat}
@@ -3615,13 +3662,13 @@ function ActivityPage() {
       </div>
 
       {filtered.length === 0 ? (
-        <p className="text-white/30 text-sm py-8 text-center">
+        <p className="text-[var(--text-faint)] text-sm py-8 text-center">
           {entries.length === 0 ? "Nothing here yet — actions you take across the app will show up here." : "Nothing in this category yet."}
         </p>
       ) : (
         <div className="space-y-2">
           {filtered.map((entry) => (
-            <div key={entry.id} className="flex items-start justify-between gap-3 bg-white/5 rounded-lg px-4 py-3">
+            <div key={entry.id} className="flex items-start justify-between gap-3 bg-[var(--surface-subtle)] rounded-lg px-4 py-3">
               <div className="min-w-0">
                 <div className="flex items-center gap-2 mb-0.5">
                   <span
@@ -3629,12 +3676,12 @@ function ActivityPage() {
                       entry.tone === "ok" ? "bg-emerald-400" : "bg-rose-400"
                     }`}
                   />
-                  <span className="text-white text-sm font-medium truncate">{entry.title}</span>
-                  <span className="text-white/30 text-[10px] uppercase tracking-wide shrink-0">{entry.category}</span>
+                  <span className="text-[var(--text-primary)] text-sm font-medium truncate">{entry.title}</span>
+                  <span className="text-[var(--text-faint)] text-[10px] uppercase tracking-wide shrink-0">{entry.category}</span>
                 </div>
-                {entry.message && <p className="text-white/50 text-xs break-all">{entry.message}</p>}
+                {entry.message && <p className="text-[var(--text-secondary)] text-xs break-all">{entry.message}</p>}
               </div>
-              <span className="text-white/30 text-xs shrink-0">{relativeTime(entry.timestamp)}</span>
+              <span className="text-[var(--text-faint)] text-xs shrink-0">{relativeTime(entry.timestamp)}</span>
             </div>
           ))}
         </div>
@@ -3707,8 +3754,8 @@ function HistoryPage({ wallet }) {
 
   return (
     <GlassCard className="p-6">
-      <h2 className="text-white text-lg font-semibold mb-1">History</h2>
-      <p className="text-white/40 text-xs mb-4">
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-1">History</h2>
+      <p className="text-[var(--text-muted)] text-xs mb-4">
         Real on-chain EURC and cirBTC transfers for your address
         {scanned && ` — blocks ${scanned.fromBlock.toLocaleString()} to ${scanned.toBlock.toLocaleString()}`}.
         Native USDC transfers aren't shown here since they don't emit event logs; check the{" "}
@@ -3730,7 +3777,7 @@ function HistoryPage({ wallet }) {
         </div>
       )}
       {!loading && rows.length === 0 && (
-        <p className="text-white/40 text-sm">No EURC or cirBTC transfers found in the recent block range.</p>
+        <p className="text-[var(--text-muted)] text-sm">No EURC or cirBTC transfers found in the recent block range.</p>
       )}
       <div className="space-y-2">
         {rows.map((tx) => (
@@ -3739,11 +3786,11 @@ function HistoryPage({ wallet }) {
             href={`${ARC_TESTNET.blockExplorerUrls[0]}/tx/${tx.txHash}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="flex justify-between items-center text-sm border-t border-white/5 pt-2 pb-1 hover:bg-white/5 rounded px-1 -mx-1 transition"
+            className="flex justify-between items-center text-sm border-t border-[var(--border-subtle)] pt-2 pb-1 hover:bg-[var(--surface-subtle)] rounded px-1 -mx-1 transition"
           >
-            <div className="text-white/80">
+            <div className="text-[var(--text-strong)]">
               {tx.direction} {tx.amount} {tx.token}
-              <span className="text-white/30 font-mono text-xs ml-2">
+              <span className="text-[var(--text-faint)] font-mono text-xs ml-2">
                 {tx.direction === "Sent" ? "→" : "←"} {tx.counterparty.slice(0, 8)}…
               </span>
             </div>
@@ -3811,8 +3858,8 @@ function LeaderboardPage({ wallet }) {
 
   return (
     <GlassCard className="p-6">
-      <h2 className="text-white text-lg font-semibold mb-1">Leaderboard</h2>
-      <p className="text-white/40 text-xs mb-4">
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-1">Leaderboard</h2>
+      <p className="text-[var(--text-muted)] text-xs mb-4">
         Ranked by number of on-chain EURC/cirBTC transfers sent
         {scanned && ` — blocks ${scanned.fromBlock.toLocaleString()} to ${scanned.toBlock.toLocaleString()}`}.
         Recent activity only, not all-time.
@@ -3825,13 +3872,13 @@ function LeaderboardPage({ wallet }) {
         </div>
       )}
       {!loading && rows.length === 0 && (
-        <p className="text-white/40 text-sm">No transfer activity found in the recent block range.</p>
+        <p className="text-[var(--text-muted)] text-sm">No transfer activity found in the recent block range.</p>
       )}
       {rows.map((r, i) => (
         <div
           key={r.address}
-          className={`flex justify-between items-center text-sm border-t border-white/5 pt-2 pb-1 ${
-            wallet.address?.toLowerCase() === r.address.toLowerCase() ? "text-cyan-300" : "text-white/80"
+          className={`flex justify-between items-center text-sm border-t border-[var(--border-subtle)] pt-2 pb-1 ${
+            wallet.address?.toLowerCase() === r.address.toLowerCase() ? "text-cyan-300" : "text-[var(--text-strong)]"
           }`}
         >
           <span className="font-mono">
@@ -3853,20 +3900,20 @@ function LeaderboardPage({ wallet }) {
 function WalletProfilePage({ wallet }) {
   return (
     <GlassCard className="p-6 max-w-lg">
-      <h2 className="text-white text-lg font-semibold mb-4">Wallet Profile</h2>
-      <p className="text-white/50 text-xs">Address</p>
-      <p className="text-white font-mono text-sm mb-3 break-all">{wallet.address || "—"}</p>
-      <p className="text-white/50 text-xs">Network</p>
-      <p className="text-white text-sm mb-3">{wallet.chainId ?? "—"}</p>
-      <p className="text-white/50 text-xs">Wallet created</p>
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-4">Wallet Profile</h2>
+      <p className="text-[var(--text-secondary)] text-xs">Address</p>
+      <p className="text-[var(--text-primary)] font-mono text-sm mb-3 break-all">{wallet.address || "—"}</p>
+      <p className="text-[var(--text-secondary)] text-xs">Network</p>
+      <p className="text-[var(--text-primary)] text-sm mb-3">{wallet.chainId ?? "—"}</p>
+      <p className="text-[var(--text-secondary)] text-xs">Wallet created</p>
       {wallet.isCircleWallet ? (
-        <p className="text-white text-sm mb-3">
+        <p className="text-[var(--text-primary)] text-sm mb-3">
           {wallet.createDate
             ? new Date(wallet.createDate).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })
             : "—"}
         </p>
       ) : (
-        <p className="text-white/40 text-sm mb-3">
+        <p className="text-[var(--text-muted)] text-sm mb-3">
           Not available — MetaMask/WalletConnect wallets are just key pairs with no registration event, so there's no "creation date" to report. This is only known for Circle email wallets, since Circle's own records include it.
         </p>
       )}
@@ -3905,7 +3952,7 @@ function QrCodeImage({ value }) {
   return <img src={dataUrl} alt="WalletConnect QR code" className="mx-auto rounded-lg" />;
 }
 
-function LoginGate({ wallet, auth, circleWallet }) {
+function LoginGate({ wallet, auth, circleWallet, theme, toggleTheme }) {
   const [notRobot, setNotRobot] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const [showEmailForm, setShowEmailForm] = useState(false);
@@ -3915,26 +3962,52 @@ function LoginGate({ wallet, auth, circleWallet }) {
   const injectedConnectors = wallet.connectors.filter((c) => c.kind === "injected");
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
-      <div className="flex-1 flex flex-col items-center justify-center p-6 gap-6">
+    <div className="min-h-screen flex flex-col bg-[var(--bg-base)] bg-[radial-gradient(circle_at_20%_0%,var(--bg-grad-1),transparent_45%),radial-gradient(circle_at_80%_100%,var(--bg-grad-2),transparent_40%)]">
+      <div className="flex justify-end p-4">
+        <button
+          onClick={toggleTheme}
+          aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-soft)] hover:bg-[var(--surface-subtle)] transition"
+        >
+          {theme === "dark" ? (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <circle cx="12" cy="12" r="5" />
+              <line x1="12" y1="1" x2="12" y2="3" />
+              <line x1="12" y1="21" x2="12" y2="23" />
+              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+              <line x1="1" y1="12" x2="3" y2="12" />
+              <line x1="21" y1="12" x2="23" y2="12" />
+              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+            </svg>
+          )}
+        </button>
+      </div>
+      <div className="flex-1 flex flex-col items-center justify-center p-6 gap-6 -mt-16">
         <GlassCard className="w-full max-w-md p-8">
           <div className="flex items-center justify-center gap-2 mb-1">
             <img src="/favicon.svg" alt="Arclify" className="w-9 h-9" />
-            <span className="text-white text-lg font-semibold tracking-tight">Arclify</span>
+            <span className="text-[var(--text-primary)] text-lg font-semibold tracking-tight">Arclify</span>
           </div>
           <p className="text-cyan-300/60 text-xs text-center mb-3">Our app is built on Arc</p>
-          <p className="text-white/50 text-sm text-center mb-6">
+          <p className="text-[var(--text-secondary)] text-sm text-center mb-6">
             Sign in with your wallet to open your Arc Testnet dashboard.
           </p>
 
-          <label className="flex items-center gap-3 mb-5 px-4 py-3 rounded-xl border border-white/10 bg-white/5 cursor-pointer select-none">
+          <label className="flex items-center gap-3 mb-5 px-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] cursor-pointer select-none">
             <input
               type="checkbox"
               checked={notRobot}
               onChange={(e) => setNotRobot(e.target.checked)}
               className="w-4 h-4 accent-cyan-400"
             />
-            <span className="text-white/80 text-sm">I am not a robot</span>
+            <span className="text-[var(--text-strong)] text-sm">I am not a robot</span>
           </label>
 
           {!showPicker ? (
@@ -3949,7 +4022,7 @@ function LoginGate({ wallet, auth, circleWallet }) {
             <div className="space-y-2">
               {wallet.qrUri ? (
                 <div className="text-center py-2">
-                  <p className="text-white/50 text-xs mb-3">
+                  <p className="text-[var(--text-secondary)] text-xs mb-3">
                     Scan with any WalletConnect-compatible wallet app
                   </p>
                   <QrCodeImage value={wallet.qrUri} />
@@ -3962,50 +4035,50 @@ function LoginGate({ wallet, auth, circleWallet }) {
                 </div>
               ) : (
                 <>
-                  <p className="text-white/50 text-xs mb-1">Choose a wallet</p>
+                  <p className="text-[var(--text-secondary)] text-xs mb-1">Choose a wallet</p>
                   {wallet.connectors.map((c) => (
                     <button
                       key={c.id}
                       disabled={busy}
                       onClick={() => auth.login(c.id)}
-                      className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition text-left disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] hover:bg-[var(--surface)] transition text-left disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {c.icon ? (
                         <img src={c.icon} alt="" className="w-6 h-6 rounded" />
                       ) : (
                         <div className="w-6 h-6 rounded bg-gradient-to-br from-cyan-400 to-purple-600" />
                       )}
-                      <span className="text-white text-sm">{c.name}</span>
+                      <span className="text-[var(--text-primary)] text-sm">{c.name}</span>
                     </button>
                   ))}
                   {injectedConnectors.length === 0 && (
-                    <p className="text-white/40 text-xs pt-1">
+                    <p className="text-[var(--text-muted)] text-xs pt-1">
                       No browser wallet extension detected — use WalletConnect above
                       to scan a QR code with any mobile wallet.
                     </p>
                   )}
                   {isMobileDevice() && injectedConnectors.length > 0 && (
-                    <p className="text-white/40 text-xs pt-1">
+                    <p className="text-[var(--text-muted)] text-xs pt-1">
                       On a phone, WalletConnect tends to be the more reliable choice
                       — an injected option like MetaMask can silently fail to return
                       after switching apps to approve.
                     </p>
                   )}
 
-                  <div className="pt-2 mt-2 border-t border-white/5">
+                  <div className="pt-2 mt-2 border-t border-[var(--border-subtle)]">
                     {!showEmailForm ? (
                       <button
                         onClick={() => setShowEmailForm(true)}
-                        className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition text-left"
+                        className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] hover:bg-[var(--surface)] transition text-left"
                       >
-                        <div className="w-6 h-6 rounded bg-gradient-to-br from-emerald-400 to-teal-600 flex items-center justify-center text-xs text-white">
+                        <div className="w-6 h-6 rounded bg-gradient-to-br from-emerald-400 to-teal-600 flex items-center justify-center text-xs text-[var(--text-primary)]">
                           ✉
                         </div>
-                        <span className="text-white text-sm">Sign in with Email</span>
+                        <span className="text-[var(--text-primary)] text-sm">Sign in with Email</span>
                       </button>
                     ) : (
                       <div className="space-y-2">
-                        <p className="text-white/50 text-xs mb-1">
+                        <p className="text-[var(--text-secondary)] text-xs mb-1">
                           No wallet needed — you'll set a PIN to secure your account.
                         </p>
                         <input
@@ -4015,7 +4088,7 @@ function LoginGate({ wallet, auth, circleWallet }) {
                           onKeyDown={(e) => e.key === "Enter" && circleWallet.loginWithEmail(email)}
                           placeholder="you@example.com"
                           disabled={circleBusy}
-                          className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+                          className="w-full bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
                         />
                         <PrimaryButton
                           className="w-full"
@@ -4058,11 +4131,11 @@ function LoginGate({ wallet, auth, circleWallet }) {
             { step: "3", title: "Explore", desc: "Send, swap, and lock on Arc Testnet." },
           ].map((s) => (
             <div key={s.step} className="text-center">
-              <div className="mx-auto mb-2 w-7 h-7 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-cyan-300 text-xs font-semibold">
+              <div className="mx-auto mb-2 w-7 h-7 rounded-full bg-[var(--surface-subtle)] border border-[var(--border)] flex items-center justify-center text-cyan-300 text-xs font-semibold">
                 {s.step}
               </div>
-              <p className="text-white text-xs font-medium">{s.title}</p>
-              <p className="text-white/40 text-[11px] mt-0.5 leading-snug">{s.desc}</p>
+              <p className="text-[var(--text-primary)] text-xs font-medium">{s.title}</p>
+              <p className="text-[var(--text-muted)] text-[11px] mt-0.5 leading-snug">{s.desc}</p>
             </div>
           ))}
         </div>
@@ -4108,8 +4181,8 @@ function WelcomeOverlay({ onDismiss }) {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm">
       <GlassCard className="w-full max-w-sm p-7 text-center">
         <img src="/favicon.svg" alt="Arclify" className="w-10 h-10 mx-auto mb-4" />
-        <p className="text-white/50 text-sm mb-3">Did you know?</p>
-        <p className="text-white text-base leading-relaxed mb-6">{fact}</p>
+        <p className="text-[var(--text-secondary)] text-sm mb-3">Did you know?</p>
+        <p className="text-[var(--text-primary)] text-base leading-relaxed mb-6">{fact}</p>
         <PrimaryButton onClick={onDismiss} className="w-full">
           Continue
         </PrimaryButton>
@@ -4118,16 +4191,84 @@ function WelcomeOverlay({ onDismiss }) {
   );
 }
 
+const TOUR_SEEN_KEY = "arclify_tour_seen";
+
+const TOUR_STEPS = [
+  { title: "Deposit", body: "Fund your wallet with Naira, Shillings, or Cedis — real Paystack checkout for NGN, converted straight to USDC/EURC." },
+  { title: "Withdraw", body: "Cash out USDC/EURC — your tokens genuinely move on-chain, verifiable on Arcscan." },
+  { title: "Transfer & Bulk Transfer", body: "Send native USDC, EURC, or cirBTC — one at a time or in a batch." },
+  { title: "Swap", body: "Trade between stablecoins, routed through on-chain liquidity via Circle App Kit." },
+  { title: "Bridge", body: "Move USDC in from Ethereum Sepolia, Base Sepolia, or Avalanche Fuji — a real CCTP burn-and-mint, not a wrapped asset." },
+  { title: "Lending", body: "Deposit USDC as collateral, borrow EURC against it — a deployed, verified lending contract." },
+  { title: "NFT Lock & Activity", body: "Time-lock an NFT in a vault with automatic unlock detection, and track everything you've done in the Activity Centre." },
+];
+
+function OnboardingTour({ onDismiss }) {
+  const [step, setStep] = useState(0);
+  const isLast = step === TOUR_STEPS.length - 1;
+  const current = TOUR_STEPS[step];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm">
+      <GlassCard className="w-full max-w-sm p-7">
+        <div className="flex items-center gap-1.5 mb-5" role="progressbar" aria-valuenow={step + 1} aria-valuemin={1} aria-valuemax={TOUR_STEPS.length}>
+          {TOUR_STEPS.map((_, i) => (
+            <span
+              key={i}
+              className={`h-1 flex-1 rounded-full transition ${i <= step ? "bg-cyan-400" : "bg-[var(--surface)]"}`}
+            />
+          ))}
+        </div>
+        <p className="text-[var(--text-faint)] text-xs mb-1">Step {step + 1} of {TOUR_STEPS.length}</p>
+        <h3 className="text-[var(--text-primary)] text-lg font-semibold mb-2">{current.title}</h3>
+        <p className="text-[var(--text-secondary)] text-sm leading-relaxed mb-6">{current.body}</p>
+        <div className="flex items-center justify-between gap-3">
+          <button
+            onClick={onDismiss}
+            className="text-[var(--text-muted)] text-xs hover:text-[var(--text-soft)]"
+          >
+            Skip
+          </button>
+          <div className="flex gap-2">
+            {step > 0 && (
+              <button
+                onClick={() => setStep((s) => s - 1)}
+                className="px-4 py-2 rounded-xl text-sm border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              >
+                Back
+              </button>
+            )}
+            <PrimaryButton onClick={() => (isLast ? onDismiss() : setStep((s) => s + 1))}>
+              {isLast ? "Get started" : "Next"}
+            </PrimaryButton>
+          </div>
+        </div>
+      </GlassCard>
+    </div>
+  );
+}
+
 function ContactFooter() {
   return (
-    <footer className="px-4 sm:px-6 py-5 text-center border-t border-white/5">
-      <p className="text-white/30 text-xs">
+    <footer className="px-4 sm:px-6 py-6 text-center border-t border-[var(--border-subtle)]">
+      <div className="flex flex-wrap items-center justify-center gap-2 mb-3">
+        <span className="text-[var(--text-faint)] text-[10px] uppercase tracking-wide mr-1">Built with</span>
+        {["Circle App Kit", "Circle Wallets", "Circle CCTP", "Arc Testnet"].map((badge) => (
+          <span
+            key={badge}
+            className="text-[10px] px-2.5 py-1 rounded-full border border-[var(--border)] bg-[var(--surface-subtle)] text-[var(--text-tertiary)]"
+          >
+            {badge}
+          </span>
+        ))}
+      </div>
+      <p className="text-[var(--text-faint)] text-xs">
         Built by {OWNER_INFO.name} ·{" "}
         <a
           href={OWNER_INFO.xUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-white/40 hover:text-cyan-300"
+          className="text-[var(--text-muted)] hover:text-cyan-300"
         >
           {OWNER_INFO.xHandle}
         </a>{" "}
@@ -4216,6 +4357,19 @@ export default function ArcTestnetDApp() {
   const circleWallet = useCircleWallet();
   const [page, setPage] = useState("Dashboard");
   const [showWelcome, setShowWelcome] = useState(false);
+  const [showTour, setShowTour] = useState(false);
+
+  // Theme is applied via a `data-theme` attribute on <html> rather than
+  // prop-drilled through every page — every color in the app now reads
+  // from CSS custom properties (see index.css), so toggling this one
+  // attribute updates the whole app's palette at once, regardless of
+  // component boundaries.
+  const [theme, setTheme] = useState(() => readLS("arc_theme", "dark"));
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    writeLS("arc_theme", theme);
+  }, [theme]);
+  const toggleTheme = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
 
   const isLoggedInViaCircle = circleWallet.status === "ready" && !!circleWallet.address;
   const isLoggedIn = auth.status === "authenticated" || isLoggedInViaCircle;
@@ -4275,32 +4429,50 @@ export default function ArcTestnetDApp() {
       case "History": return <HistoryPage wallet={effectiveWallet} />;
       case "Leaderboard": return <LeaderboardPage wallet={effectiveWallet} />;
       case "Wallet Profile": return <WalletProfilePage wallet={effectiveWallet} />;
-      default: return null;
+      default:
+        return (
+          <GlassCard className="p-6 max-w-lg text-center">
+            <p className="text-[var(--text-primary)] text-lg font-semibold mb-2">Page not found</p>
+            <p className="text-[var(--text-secondary)] text-sm mb-5">"{page}" isn't a page in Arclify.</p>
+            <PrimaryButton onClick={() => setPage("Dashboard")}>Go to Dashboard</PrimaryButton>
+          </GlassCard>
+        );
     }
   }, [page, effectiveWallet]);
 
   if (auth.status === "checking") {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#0B0A16]">
-        <p className="text-white/40 text-sm">Loading…</p>
+      <div className="min-h-screen flex items-center justify-center bg-[var(--bg-base)]">
+        <p className="text-[var(--text-muted)] text-sm">Loading…</p>
       </div>
     );
   }
 
   if (!isLoggedIn) {
-    return <LoginGate wallet={wallet} auth={auth} circleWallet={circleWallet} />;
+    return <LoginGate wallet={wallet} auth={auth} circleWallet={circleWallet} theme={theme} toggleTheme={toggleTheme} />;
   }
 
   return (
-    <div className="min-h-screen bg-[#0B0A16] bg-[radial-gradient(circle_at_20%_0%,rgba(124,58,237,0.25),transparent_45%),radial-gradient(circle_at_80%_100%,rgba(34,211,238,0.15),transparent_40%)]">
+    <div className="min-h-screen bg-[var(--bg-base)] bg-[radial-gradient(circle_at_20%_0%,var(--bg-grad-1),transparent_45%),radial-gradient(circle_at_80%_100%,var(--bg-grad-2),transparent_40%)]">
       <ToastViewport />
       <CommandBar wallet={effectiveWallet} onNavigate={setPage} />
-      {showWelcome && <WelcomeOverlay onDismiss={() => setShowWelcome(false)} />}
-      <header className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-4 border-b border-white/5">
+      {showWelcome && (
+        <WelcomeOverlay
+          onDismiss={() => {
+            setShowWelcome(false);
+            if (!localStorage.getItem(TOUR_SEEN_KEY)) {
+              localStorage.setItem(TOUR_SEEN_KEY, "1");
+              setShowTour(true);
+            }
+          }}
+        />
+      )}
+      {showTour && <OnboardingTour onDismiss={() => setShowTour(false)} />}
+      <header className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-4 border-b border-[var(--border-subtle)]">
         <div className="flex items-center gap-2">
           <img src="/favicon.svg" alt="Arclify" className="w-7 h-7" />
           <div className="leading-tight">
-            <span className="block text-white font-semibold tracking-tight">Arclify</span>
+            <span className="block text-[var(--text-primary)] font-semibold tracking-tight">Arclify</span>
             <span className="block text-cyan-300/50 text-[10px]">Built on Arc</span>
           </div>
         </div>
@@ -4313,8 +4485,32 @@ export default function ArcTestnetDApp() {
           </Pill>
           {effectiveWallet.address && <CopyButton value={effectiveWallet.address} />}
           <button
+            onClick={toggleTheme}
+            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-soft)] hover:bg-[var(--surface-subtle)] transition"
+          >
+            {theme === "dark" ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <circle cx="12" cy="12" r="5" />
+                <line x1="12" y1="1" x2="12" y2="3" />
+                <line x1="12" y1="21" x2="12" y2="23" />
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                <line x1="1" y1="12" x2="3" y2="12" />
+                <line x1="21" y1="12" x2="23" y2="12" />
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
+            )}
+          </button>
+          <button
             onClick={() => { auth.logout(); circleWallet.logout(); }}
-            className="text-white/40 text-xs hover:text-white/70"
+            className="text-[var(--text-muted)] text-xs hover:text-[var(--text-soft)]"
           >
             Sign out
           </button>
@@ -4336,15 +4532,15 @@ export default function ArcTestnetDApp() {
 
       <div className="flex flex-col sm:flex-row">
         {/* Horizontal scrollable pill nav on mobile; vertical sidebar from sm breakpoint up */}
-        <nav className="flex sm:flex-col gap-1 overflow-x-auto sm:overflow-visible whitespace-nowrap sm:whitespace-normal p-3 sm:p-4 sm:w-48 sm:shrink-0 sm:space-y-1 border-b sm:border-b-0 border-white/5">
+        <nav className="flex sm:flex-col gap-1 overflow-x-auto sm:overflow-visible whitespace-nowrap sm:whitespace-normal p-3 sm:p-4 sm:w-48 sm:shrink-0 sm:space-y-1 border-b sm:border-b-0 border-[var(--border-subtle)]">
           {NAV_ITEMS.map((item) => (
             <button
               key={item}
               onClick={() => setPage(item)}
               className={`shrink-0 sm:w-full text-left px-3 py-2 rounded-lg text-sm transition ${
                 page === item
-                  ? "bg-white/10 text-white"
-                  : "text-white/50 hover:text-white/80 hover:bg-white/5"
+                  ? "bg-[var(--surface)] text-[var(--text-primary)]"
+                  : "text-[var(--text-secondary)] hover:text-[var(--text-strong)] hover:bg-[var(--surface-subtle)]"
               }`}
             >
               {item}
