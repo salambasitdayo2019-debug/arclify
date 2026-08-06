@@ -105,6 +105,20 @@ const NATIVE_BALANCE_DECIMALS = 18;
  * code -32005). Any other error is thrown immediately — we only want to
  * absorb "you're going too fast," not mask real failures.
  */
+// Fires on every successful login, both wallet types — best-effort, never
+// blocks or fails the actual login if either destination is unreachable.
+// Two destinations, two different questions: the backend log (a Google
+// Sheet, since there's no database) answers "who, specifically, signed
+// in" — GA4 answers "how much traffic is this getting, in aggregate."
+function logLoginEvent(address, walletType) {
+  fetch(`${API_BASE}/analytics/log-login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address, walletType }),
+  }).catch(() => {});
+  window.gtag?.("event", "login", { method: walletType });
+}
+
 async function withRpcRetry(fn, { retries = 5, baseDelayMs = 900 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -706,6 +720,7 @@ function useAuth(wallet) {
         );
         setSessionAddress(address);
         setStatus("authenticated");
+        logLoginEvent(address, connectorId || "injected");
       } catch (e) {
         setError(
           e?.code === "ACTION_REJECTED" || e?.code === 4001
@@ -938,6 +953,7 @@ function useCircleWallet() {
               const w = await loadWalletAndBalance(userToken);
               localStorage.setItem(CIRCLE_SESSION_STORAGE_KEY, JSON.stringify(sessionRef.current));
               setStatus(w ? "ready" : "error");
+              if (w) logLoginEvent(w.address, "circle");
             } catch (e) {
               setError(e.message);
               setStatus("error");
@@ -948,6 +964,7 @@ function useCircleWallet() {
           const w = await loadWalletAndBalance(userToken);
           localStorage.setItem(CIRCLE_SESSION_STORAGE_KEY, JSON.stringify(sessionRef.current));
           setStatus(w ? "ready" : "error");
+          if (w) logLoginEvent(w.address, "circle");
         } else {
           throw new Error(initData.error || initData.message || "Could not initialize wallet.");
         }
@@ -4370,6 +4387,24 @@ export default function ArcTestnetDApp() {
     writeLS("arc_theme", theme);
   }, [theme]);
   const toggleTheme = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
+
+  // Google Analytics — loads gtag.js dynamically rather than baking it
+  // into index.html, so it's entirely optional and env-gated. No-ops
+  // until VITE_GA_MEASUREMENT_ID is actually set.
+  useEffect(() => {
+    const measurementId = import.meta?.env?.VITE_GA_MEASUREMENT_ID;
+    if (!measurementId || window.__gaLoaded) return;
+    window.__gaLoaded = true;
+    const script = document.createElement("script");
+    script.src = `https://www.googletagmanager.com/gtag/js?id=${measurementId}`;
+    script.async = true;
+    document.head.appendChild(script);
+    window.dataLayer = window.dataLayer || [];
+    function gtag() { window.dataLayer.push(arguments); }
+    window.gtag = gtag;
+    gtag("js", new Date());
+    gtag("config", measurementId);
+  }, []);
 
   const isLoggedInViaCircle = circleWallet.status === "ready" && !!circleWallet.address;
   const isLoggedIn = auth.status === "authenticated" || isLoggedInViaCircle;
