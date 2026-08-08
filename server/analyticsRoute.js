@@ -24,17 +24,21 @@ const router = express.Router();
 
 router.post("/analytics/log-login", async (req, res) => {
   const { address, walletType } = req.body || {};
+  console.log(`[analytics] /log-login hit — address=${address} walletType=${walletType}`);
+
   if (!address || !walletType) {
+    console.log("[analytics] rejected — missing address or walletType");
     return res.status(400).json({ error: "Missing address or walletType." });
   }
 
   // No webhook configured yet — don't error, just skip logging.
   if (!process.env.GOOGLE_SHEETS_WEBHOOK_URL) {
+    console.log("[analytics] GOOGLE_SHEETS_WEBHOOK_URL is not set — skipping.");
     return res.json({ logged: false });
   }
 
   try {
-    await fetch(process.env.GOOGLE_SHEETS_WEBHOOK_URL, {
+    const webhookRes = await fetch(process.env.GOOGLE_SHEETS_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -44,11 +48,13 @@ router.post("/analytics/log-login", async (req, res) => {
         userAgent: req.headers["user-agent"] || "",
       }),
     });
+    const bodyText = await webhookRes.text();
+    console.log(`[analytics] webhook responded ${webhookRes.status}: ${bodyText.slice(0, 200)}`);
     res.json({ logged: true });
   } catch (err) {
     // Logging failing shouldn't surface as an error to the user — this
     // is purely for the app owner's visibility, not user-facing.
-    console.error("Failed to log login event:", err.message);
+    console.error("[analytics] Failed to log login event:", err.message);
     res.json({ logged: false });
   }
 });
