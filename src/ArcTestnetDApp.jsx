@@ -881,7 +881,14 @@ function useCircleWallet() {
       sessionRef.current = session;
       setStatus("working");
       loadWalletAndBalance(session.userToken)
-        .then((w) => setStatus(w ? "ready" : "idle"))
+        .then((w) => {
+          setStatus(w ? "ready" : "idle");
+          // Session restore bypasses loginWithEmail entirely, so without this
+          // a restored session never shows up in the login log — tagged
+          // "circle-restore" (not "circle") so it's easy to tell apart from
+          // a genuine fresh sign-in in the sheet/GA4.
+          if (w) logLoginEvent(w.address, "circle-restore");
+        })
         .catch(() => {
           localStorage.removeItem(CIRCLE_SESSION_STORAGE_KEY);
           setStatus("idle");
