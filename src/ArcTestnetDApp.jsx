@@ -2801,6 +2801,7 @@ function LendingPage({ wallet }) {
   const [fundAmount, setFundAmount] = useState("");
   const [busy, setBusy] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [lastSynced, setLastSynced] = useState(null);
 
   const loadAccount = useCallback(async () => {
     if (!wallet.address) return;
@@ -2832,6 +2833,7 @@ function LendingPage({ wallet }) {
         interestRateBps: Number(ir),
       });
       setLoadError(null);
+      setLastSynced(Date.now());
     } catch (e) {
       console.warn("Failed to load lending account data:", e);
       setLoadError(e.shortMessage || e.message || "Failed to load account data.");
@@ -2951,7 +2953,20 @@ function LendingPage({ wallet }) {
 
   return (
     <GlassCard className="p-6 max-w-lg">
-      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-1">Lending</h2>
+      <div className="flex items-start justify-between gap-3 mb-1">
+        <h2 className="text-[var(--text-primary)] text-lg font-semibold">Lending</h2>
+        <div className="text-right shrink-0">
+          <button
+            onClick={refresh}
+            className="text-[var(--text-muted)] text-xs hover:text-[var(--text-soft)] underline decoration-dotted"
+          >
+            Refresh
+          </button>
+          {lastSynced && (
+            <p className="text-[var(--text-faint)] text-[10px] mt-0.5">Last synced {relativeTime(lastSynced)}</p>
+          )}
+        </div>
+      </div>
       <p className="text-[var(--text-muted)] text-xs mb-4">
         Deposit USDC as collateral, borrow EURC against it. Fixed exchange
         rate (not a live oracle) and fixed interest — a starting point, not
@@ -2968,6 +2983,17 @@ function LendingPage({ wallet }) {
           >
             Retry →
           </button>
+        </div>
+      )}
+
+      {!account && !loadError && (
+        <div className="grid grid-cols-2 gap-3 mb-5 text-sm">
+          {["Your collateral", "Your debt", "Max borrowable", "Pool liquidity"].map((label) => (
+            <div key={label} className="bg-[var(--surface-subtle)] rounded-lg p-3">
+              <p className="text-[var(--text-muted)] text-xs mb-2">{label}</p>
+              <Skeleton className="h-5 w-20" />
+            </div>
+          ))}
         </div>
       )}
 
@@ -2996,6 +3022,10 @@ function LendingPage({ wallet }) {
         <p className="mb-4 text-xs text-rose-300 bg-rose-950/40 border border-rose-500/30 rounded-lg p-3">
           Your position is eligible for liquidation — your debt has exceeded the safe threshold. Repay some debt now to avoid losing your collateral.
         </p>
+      )}
+
+      {!poolInfo && (
+        <Skeleton className="h-3 w-full max-w-md mb-5" />
       )}
 
       {poolInfo && (
@@ -3606,6 +3636,7 @@ function NFTLockPage({ wallet }) {
   const [lockDetails, setLockDetails] = useState({});
   const [duration, setDuration] = useState("7");
   const [busy, setBusy] = useState(false);
+  const [lastSynced, setLastSynced] = useState(null);
 
   const getContracts = useCallback(async () => {
     const signer = await wallet.provider.getSigner();
@@ -3641,6 +3672,7 @@ function NFTLockPage({ wallet }) {
         })
       );
       setLockDetails(Object.fromEntries(entries));
+      setLastSynced(Date.now());
     }
     loadLockDetails();
   }, [wallet.provider, lockIds]);
@@ -3801,7 +3833,12 @@ function NFTLockPage({ wallet }) {
 
       {lockIds.length > 0 && (
         <div className="mt-5">
-          <p className="text-[var(--text-secondary)] text-xs mb-2">Your locks</p>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-[var(--text-secondary)] text-xs">Your locks</p>
+            {lastSynced && (
+              <p className="text-[var(--text-faint)] text-[10px]">Last synced {relativeTime(lastSynced)}</p>
+            )}
+          </div>
           <div className="space-y-2">
             {lockIds.map((id) => {
               const d = lockDetails[id];
@@ -3819,7 +3856,7 @@ function NFTLockPage({ wallet }) {
                       <Pill tone="warn">Locked until {new Date(d.unlockAt).toLocaleDateString()}</Pill>
                     )
                   ) : (
-                    <Pill tone="neutral">Loading…</Pill>
+                    <Skeleton className="h-6 w-24" />
                   )}
                 </div>
               );
