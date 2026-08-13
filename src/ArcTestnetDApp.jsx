@@ -753,6 +753,13 @@ function useAuth(wallet) {
 
 function useCircleWallet() {
   const [status, setStatus] = useState("idle"); // idle | working | pinChallenge | ready | error
+  // Synchronous check (no flicker): true only when a persisted session
+  // genuinely exists, so the landing page never flashes for someone who's
+  // actually still logged in — and stays false (no delay at all) for
+  // everyone else, who never had a session to restore in the first place.
+  const [restoringSession, setRestoringSession] = useState(
+    () => typeof window !== "undefined" && !!localStorage.getItem(CIRCLE_SESSION_STORAGE_KEY)
+  );
   const [error, setError] = useState(null);
   const [address, setAddress] = useState(null);
   const [walletId, setWalletId] = useState(null);
@@ -913,6 +920,7 @@ function useCircleWallet() {
       loadWalletAndBalance(session.userToken)
         .then((w) => {
           setStatus(w ? "ready" : "idle");
+          setRestoringSession(false);
           // Session restore bypasses loginWithEmail entirely, so without this
           // a restored session never shows up in the login log — tagged
           // "circle-restore" (not "circle") so it's easy to tell apart from
@@ -922,9 +930,11 @@ function useCircleWallet() {
         .catch(() => {
           localStorage.removeItem(CIRCLE_SESSION_STORAGE_KEY);
           setStatus("idle");
+          setRestoringSession(false);
         });
     } catch {
       localStorage.removeItem(CIRCLE_SESSION_STORAGE_KEY);
+      setRestoringSession(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1179,6 +1189,7 @@ function useCircleWallet() {
 
   return {
     status,
+    restoringSession,
     error,
     address,
     walletId,
@@ -4917,7 +4928,7 @@ export default function ArcTestnetDApp() {
     }
   }, [page, effectiveWallet]);
 
-  if (auth.status === "checking") {
+  if (auth.status === "checking" || circleWallet.restoringSession) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[var(--bg-base)]">
         <p className="text-[var(--text-muted)] text-sm">Loading…</p>
