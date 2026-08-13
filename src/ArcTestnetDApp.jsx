@@ -792,14 +792,38 @@ function useCircleWallet() {
     };
   }, []);
 
+  // Circle's iframe reports many *recoverable* in-flow validation issues
+  // (e.g. "hint can't be the same as the answer", a PIN typo with retries
+  // left) through the same onError channel it uses for genuinely fatal
+  // ones — and critically, Circle's own SDK does NOT close its iframe for
+  // the recoverable kind (confirmed in @circle-fin/w3s-pw-web-sdk's
+  // messageHandler: the onError branch never calls closeModal(), only
+  // onClose/onComplete do). The iframe stays open, showing the message
+  // itself, expecting the user to just fix the input and continue.
+  // Treating every onError as fatal — resetting our own status and
+  // showing our own error banner — fights the still-open iframe sitting
+  // right in front of the user and leaves a stray error message stuck on
+  // the page after the user moves on. Only these codes mean the challenge
+  // is actually dead on Circle's side; anything else, we just log and let
+  // the iframe do its job.
+  const CIRCLE_TERMINAL_ERROR_CODES = new Set([
+    3, // forbidden
+    4, // unauthorized
+    12, // invalidSession
+    155104, // userTokenExpired
+    155105, // invalidUserToken
+    155116, // invalidChallengeId
+    155119, // userPinLocked
+    155120, // securityAnswersLocked
+  ]);
+  const isTerminalCircleError = (err) => !!err && CIRCLE_TERMINAL_ERROR_CODES.has(err.code);
+
   const getSdk = useCallback(() => {
     if (!sdkRef.current) {
       sdkRef.current = new W3SSdk({ appSettings: { appId: CIRCLE_APP_ID } });
     }
     return sdkRef.current;
-  }, []);
-
-  const loadWalletAndBalance = useCallback(async (userToken) => {
+  }, []);  const loadWalletAndBalance = useCallback(async (userToken) => {
     const walletsRes = await fetch(`${API_BASE}/circle/wallets?userToken=${encodeURIComponent(userToken)}`);
     if (!walletsRes.ok) throw new Error("Could not load wallet.");
     const { wallets } = await walletsRes.json();
@@ -862,7 +886,13 @@ function useCircleWallet() {
     await new Promise((resolve, reject) => {
       sdk.execute(challengeId, (err) => {
         if (err) {
-          reject(new Error(err?.message || "Wallet setup was cancelled or failed."));
+          if (isTerminalCircleError(err)) {
+            reject(new Error(err?.message || "Wallet setup was cancelled or failed."));
+          } else {
+            // Recoverable in-iframe validation nudge — Circle's modal is
+            // still open showing it; nothing for us to do here.
+            console.warn("Circle wallet-setup challenge (recoverable):", err);
+          }
           return;
         }
         resolve();
@@ -950,6 +980,14 @@ function useCircleWallet() {
           sdk.setAuthentication({ userToken, encryptionKey });
           sdk.execute(initData.challengeId, async (err) => {
             if (err) {
+              if (!isTerminalCircleError(err)) {
+                // Recoverable in-iframe validation nudge (e.g. hint/answer
+                // conflict, PIN mismatch with retries left) — Circle's
+                // modal is still open and will let the user fix it and
+                // continue. Don't tear down our own state for this.
+                console.warn("Circle PIN challenge (recoverable):", err);
+                return;
+              }
               console.error("Circle PIN challenge failed:", err);
               setError(err?.message || "PIN setup was cancelled or failed.");
               setStatus("idle");
@@ -1033,7 +1071,11 @@ function useCircleWallet() {
     await new Promise((resolve, reject) => {
       sdk.execute(challengeId, (err) => {
         if (err) {
-          reject(new Error(err?.message || "Transfer was cancelled or failed."));
+          if (isTerminalCircleError(err)) {
+            reject(new Error(err?.message || "Transfer was cancelled or failed."));
+          } else {
+            console.warn("Circle transfer challenge (recoverable):", err);
+          }
           return;
         }
         resolve();
@@ -1096,7 +1138,11 @@ function useCircleWallet() {
     await new Promise((resolve, reject) => {
       sdk.execute(challengeId, (err) => {
         if (err) {
-          reject(new Error(err?.message || "Transaction was cancelled or failed."));
+          if (isTerminalCircleError(err)) {
+            reject(new Error(err?.message || "Transaction was cancelled or failed."));
+          } else {
+            console.warn("Circle transaction challenge (recoverable):", err);
+          }
           return;
         }
         resolve();
@@ -1161,7 +1207,7 @@ const GlassCard = ({ children, className = "" }) => (
   </div>
 );
 
-const PrimaryButton = ({ children, disabled, ...props }) => (
+const PrimaryButton = ({ children, disabled, className = "", ...props }) => (
   <button
     disabled={disabled}
     className={`px-5 py-2.5 rounded-xl font-medium text-sm transition border
@@ -1169,7 +1215,7 @@ const PrimaryButton = ({ children, disabled, ...props }) => (
         disabled
           ? "bg-[var(--surface)] text-[var(--text-secondary)] border-[var(--border-strong)] cursor-not-allowed"
           : "bg-gradient-to-r from-cyan-500 to-purple-600 text-[var(--text-primary)] border-transparent hover:brightness-110 active:scale-[0.98]"
-      }`}
+      } ${className}`}
     {...props}
   >
     {children}
@@ -4136,6 +4182,234 @@ function QrCodeImage({ value }) {
   return <img src={dataUrl} alt="WalletConnect QR code" className="mx-auto rounded-lg" />;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Landing page — shown before LoginGate. Everything here is written  */
+/*  to be true of what's actually live: no invented user counts, no    */
+/*  fabricated testimonials, no compliance claims that don't apply to  */
+/*  an unaudited testnet app. The in-app "testnet only, no real funds" */
+/*  disclaimer carries through here rather than getting glossed over   */
+/*  for the sake of a punchier landing page.                           */
+/* ------------------------------------------------------------------ */
+
+function ThemeToggleButton({ theme, toggleTheme }) {
+  return (
+    <button
+      onClick={toggleTheme}
+      aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+      title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+      className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-soft)] hover:bg-[var(--surface-subtle)] transition"
+    >
+      {theme === "dark" ? (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <circle cx="12" cy="12" r="5" />
+          <line x1="12" y1="1" x2="12" y2="3" />
+          <line x1="12" y1="21" x2="12" y2="23" />
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+          <line x1="1" y1="12" x2="3" y2="12" />
+          <line x1="21" y1="12" x2="23" y2="12" />
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+        </svg>
+      ) : (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+const LANDING_FEATURES = [
+  { label: "Deposit", glyph: "↓", grad: "from-cyan-400 to-cyan-600", desc: "Bring in testnet USDC/EURC via a real Paystack checkout — verified server-side, credited on-chain." },
+  { label: "Withdraw", glyph: "↑", grad: "from-purple-400 to-purple-600", desc: "Move tokens out on-chain for real; the fiat payout leg is labeled as prototype." },
+  { label: "Transfer", glyph: "→", grad: "from-emerald-400 to-emerald-600", desc: "Send USDC, EURC, or cirBTC to any address, one at a time." },
+  { label: "Bulk Transfer", glyph: "⇉", grad: "from-emerald-400 to-teal-600", desc: "Same transfer, batched — pay several addresses in one pass." },
+  { label: "Swap", glyph: "⇄", grad: "from-orange-400 to-orange-600", desc: "Token-to-token swaps via Circle App Kit, with a live fee quote instead of a guess." },
+  { label: "Bridge", glyph: "⛓", grad: "from-cyan-400 to-purple-600", desc: "Real CCTP burn-and-mint between Arc, Ethereum Sepolia, Base Sepolia, and Avalanche Fuji." },
+  { label: "Lending", glyph: "%", grad: "from-purple-400 to-pink-600", desc: "Deposit collateral, borrow, repay, and watch liquidation mechanics play out — on a custom Solidity pool." },
+  { label: "NFT Lock", glyph: "⏱", grad: "from-amber-400 to-orange-600", desc: "Time-lock an NFT in a vault contract; get notified the moment it's unlockable." },
+];
+
+const LANDING_STEPS = [
+  { n: 1, title: "Sign in", desc: "Email + PIN through Circle's Wallets (no seed phrase to lose), or connect MetaMask / WalletConnect if you'd rather hold your own keys." },
+  { n: 2, title: "Fund it", desc: "Run a testnet deposit through the real Paystack flow, or bridge in USDC from Sepolia, Base Sepolia, or Fuji." },
+  { n: 3, title: "Use every feature", desc: "Transfer, swap, bridge, lend, and lock — all on Arc Testnet, all tracked in the Activity Centre as you go." },
+];
+
+function LandingPage({ onLaunch, theme, toggleTheme }) {
+  const scrollToFeatures = () => {
+    document.getElementById("landing-features")?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  return (
+    <div className="min-h-screen bg-[var(--bg-base)] bg-[radial-gradient(circle_at_20%_0%,var(--bg-grad-1),transparent_45%),radial-gradient(circle_at_80%_100%,var(--bg-grad-2),transparent_40%)]">
+      {/* Top bar */}
+      <header className="flex items-center justify-between px-4 sm:px-6 py-4">
+        <div className="flex items-center gap-2">
+          <img src="/favicon.svg" alt="Arclify" className="w-7 h-7" />
+          <div className="leading-tight">
+            <span className="block text-[var(--text-primary)] font-semibold tracking-tight">Arclify</span>
+            <span className="block text-cyan-300/50 text-[10px]">Built on Arc</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <ThemeToggleButton theme={theme} toggleTheme={toggleTheme} />
+          <PrimaryButton onClick={onLaunch} className="px-4! py-2! text-sm">
+            Launch App
+          </PrimaryButton>
+        </div>
+      </header>
+
+      {/* Hero */}
+      <section className="px-4 sm:px-6 pt-8 pb-16 max-w-3xl mx-auto text-center">
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-[var(--border)] bg-[var(--surface-subtle)] text-cyan-300 text-xs mb-6">
+          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+          Arc Testnet · Stablecoin DeFi Dashboard
+        </div>
+        <h1 className="text-[var(--text-primary)] text-4xl sm:text-5xl font-bold tracking-tight leading-tight mb-4">
+          A full DeFi stack, built to actually try out
+        </h1>
+        <p className="text-[var(--text-secondary)] text-base sm:text-lg mb-8 max-w-xl mx-auto">
+          Deposit, transfer, swap, bridge, lend, and lock — nine features, one dashboard,
+          all running on real infrastructure against Arc Testnet. Nothing to buy, nothing at risk.
+        </p>
+        <div className="flex flex-wrap items-center justify-center gap-3 mb-6">
+          <PrimaryButton onClick={onLaunch} className="px-6! py-3!">
+            Launch App →
+          </PrimaryButton>
+          <button
+            onClick={scrollToFeatures}
+            className="px-6 py-3 rounded-xl font-medium text-sm border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--surface-subtle)] transition"
+          >
+            See what's inside
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-[var(--text-muted)] text-xs">
+          {["No KYC required", "Email + PIN or your own wallet", "Testnet — zero real funds at risk", "Contracts verified on Sourcify"].map((t) => (
+            <span key={t} className="flex items-center gap-1.5">
+              <span className="text-emerald-400">✓</span>{t}
+            </span>
+          ))}
+        </div>
+      </section>
+
+      {/* What's actually live — facts, not invented stats */}
+      <section className="px-4 sm:px-6 pb-16 max-w-4xl mx-auto">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          {[
+            { value: "9", label: "DeFi features" },
+            { value: "3", label: "Testnet chains via CCTP" },
+            { value: "3", label: "Verified contracts" },
+            { value: "0", label: "Real funds at risk" },
+          ].map((s) => (
+            <GlassCard key={s.label} className="p-5 text-center">
+              <p className="text-[var(--text-primary)] text-3xl font-bold tabular-nums">{s.value}</p>
+              <p className="text-[var(--text-muted)] text-xs mt-1">{s.label}</p>
+            </GlassCard>
+          ))}
+        </div>
+      </section>
+
+      {/* Feature grid */}
+      <section id="landing-features" className="px-4 sm:px-6 pb-16 max-w-5xl mx-auto">
+        <div className="text-center mb-10">
+          <p className="text-cyan-300 text-xs font-semibold uppercase tracking-wide mb-2">Everything you need</p>
+          <h2 className="text-[var(--text-primary)] text-3xl font-bold tracking-tight mb-3">One dashboard, nine features</h2>
+          <p className="text-[var(--text-secondary)] text-sm max-w-lg mx-auto">
+            Every feature below is wired to real Circle infrastructure and real deployed
+            contracts — this isn't a mockup of a DeFi app, it's a working one on testnet.
+          </p>
+        </div>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {LANDING_FEATURES.map((f) => (
+            <GlassCard key={f.label} className="p-6">
+              <div
+                className={`w-10 h-10 rounded-xl bg-gradient-to-br ${f.grad} flex items-center justify-center text-sm font-bold text-[var(--text-primary)] mb-4`}
+              >
+                {f.glyph}
+              </div>
+              <h3 className="text-[var(--text-primary)] text-base font-semibold mb-1.5">{f.label}</h3>
+              <p className="text-[var(--text-secondary)] text-xs leading-relaxed">{f.desc}</p>
+            </GlassCard>
+          ))}
+        </div>
+      </section>
+
+      {/* Steps */}
+      <section className="px-4 sm:px-6 pb-16 max-w-2xl mx-auto">
+        <div className="text-center mb-10">
+          <p className="text-cyan-300 text-xs font-semibold uppercase tracking-wide mb-2">Get started in minutes</p>
+          <h2 className="text-[var(--text-primary)] text-3xl font-bold tracking-tight">Three steps, no forms to fill</h2>
+        </div>
+        <div className="space-y-6">
+          {LANDING_STEPS.map((s) => (
+            <div key={s.n} className="flex gap-4">
+              <div className="w-9 h-9 shrink-0 rounded-full border border-cyan-400/40 bg-cyan-500/10 flex items-center justify-center text-cyan-300 text-sm font-semibold">
+                {s.n}
+              </div>
+              <div>
+                <h3 className="text-[var(--text-primary)] text-base font-semibold mb-1">{s.title}</h3>
+                <p className="text-[var(--text-secondary)] text-sm">{s.desc}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="text-center mt-8">
+          <PrimaryButton onClick={onLaunch} className="px-6! py-3!">
+            Start Now — Free
+          </PrimaryButton>
+        </div>
+      </section>
+
+      {/* Transparency, not a fake trust badge wall */}
+      <section className="px-4 sm:px-6 pb-16 max-w-3xl mx-auto">
+        <GlassCard className="p-8">
+          <p className="text-amber-300 text-xs font-semibold uppercase tracking-wide mb-2">Built in the open</p>
+          <h2 className="text-[var(--text-primary)] text-2xl font-bold tracking-tight mb-4">What's real, and what to know before you use it</h2>
+          <ul className="space-y-3 text-sm">
+            <li className="flex gap-2 text-[var(--text-secondary)]">
+              <span className="text-emerald-400 shrink-0">✓</span>
+              All three smart contracts are deployed and independently verified on{" "}
+              <a href="https://testnet.arcscan.app" target="_blank" rel="noopener noreferrer" className="text-cyan-300 hover:text-cyan-200 underline decoration-dotted">
+                Sourcify / Arcscan
+              </a>{" "}
+              — you can read the exact code they run.
+            </li>
+            <li className="flex gap-2 text-[var(--text-secondary)]">
+              <span className="text-emerald-400 shrink-0">✓</span>
+              Circle Wallets are non-custodial — your PIN and security answers live with Circle's own hosted flow, not on Arclify's servers.
+            </li>
+            <li className="flex gap-2 text-[var(--text-secondary)]">
+              <span className="text-amber-400 shrink-0">!</span>
+              This is testnet only, unaudited software. No real funds should ever touch it — every token here is a faucet/testnet asset with no market value.
+            </li>
+            <li className="flex gap-2 text-[var(--text-secondary)]">
+              <span className="text-amber-400 shrink-0">!</span>
+              Swap and Deposit route through a shared signer/treasury wallet, not a per-user spend limit — fine on testnet, not how a production version would work.
+            </li>
+          </ul>
+        </GlassCard>
+      </section>
+
+      {/* Final CTA */}
+      <section className="px-4 sm:px-6 pb-16 max-w-2xl mx-auto text-center">
+        <h2 className="text-[var(--text-primary)] text-2xl sm:text-3xl font-bold tracking-tight mb-3">
+          Ready to see it running?
+        </h2>
+        <p className="text-[var(--text-secondary)] text-sm mb-6">
+          No download, no KYC, no real money. Just sign in and start clicking around.
+        </p>
+        <PrimaryButton onClick={onLaunch} className="px-8! py-3!">
+          Launch App →
+        </PrimaryButton>
+      </section>
+
+      <ContactFooter />
+    </div>
+  );
+}
+
 function LoginGate({ wallet, auth, circleWallet, theme, toggleTheme }) {
   const [notRobot, setNotRobot] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
@@ -4540,6 +4814,7 @@ export default function ArcTestnetDApp() {
   const auth = useAuth(wallet);
   const circleWallet = useCircleWallet();
   const [page, setPage] = useState("Dashboard");
+  const [showLanding, setShowLanding] = useState(true);
   const [showWelcome, setShowWelcome] = useState(false);
   const [showTour, setShowTour] = useState(false);
 
@@ -4651,6 +4926,9 @@ export default function ArcTestnetDApp() {
   }
 
   if (!isLoggedIn) {
+    if (showLanding) {
+      return <LandingPage onLaunch={() => setShowLanding(false)} theme={theme} toggleTheme={toggleTheme} />;
+    }
     return <LoginGate wallet={wallet} auth={auth} circleWallet={circleWallet} theme={theme} toggleTheme={toggleTheme} />;
   }
 
