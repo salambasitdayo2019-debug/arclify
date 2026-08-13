@@ -1662,10 +1662,140 @@ const NAV_ITEMS = [
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function DashboardPage({ wallet }) {
+// Small legend row used next to the portfolio donut.
+function LegendRow({ colorClass, label, pct, amount }) {
+  return (
+    <div className="flex items-center gap-2 text-sm">
+      <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${colorClass}`} />
+      <span className="text-[var(--text-secondary)] w-14 shrink-0">{label}</span>
+      <span className="text-[var(--text-primary)] font-medium tabular-nums">{pct.toFixed(0)}%</span>
+      <span className="text-[var(--text-faint)] text-xs tabular-nums truncate">{amount}</span>
+    </div>
+  );
+}
+
+// Token mix donut — shown by *amount*, not USD value. EURC and cirBTC
+// aren't run through a price feed anywhere in this app (see the hero
+// total's own caveat), so a value-weighted pie would silently imply a
+// conversion rate that doesn't exist. Labeling it as a raw-amount mix
+// keeps it honest with what the data actually is.
+function TokenAllocationDonut({ balances }) {
+  const usdc = Number(balances.USDC) || 0;
+  const eurc = Number(balances.EURC) || 0;
+  const cirbtc = Number(balances.cirBTC) || 0;
+  const total = usdc + eurc + cirbtc;
+
+  if (total <= 0) return null;
+
+  const pUsdc = (usdc / total) * 100;
+  const pEurc = (eurc / total) * 100;
+  const pCirbtc = Math.max(0, 100 - pUsdc - pEurc);
+
+  const stops = `#22d3ee 0% ${pUsdc}%, #a855f7 ${pUsdc}% ${pUsdc + pEurc}%, #fb923c ${pUsdc + pEurc}% 100%`;
+
+  return (
+    <GlassCard className="p-6">
+      <div className="flex items-center justify-between mb-5">
+        <span className="text-[var(--text-secondary)] text-sm font-medium">Token mix</span>
+        <span className="text-[var(--text-faint)] text-[10px]">By amount, not USD value</span>
+      </div>
+      <div className="flex items-center gap-6 flex-wrap">
+        <div className="w-24 h-24 rounded-full shrink-0" style={{ background: `conic-gradient(${stops})` }}>
+          <div
+            className="w-full h-full rounded-full flex items-center justify-center"
+            style={{ background: "radial-gradient(circle, var(--surface-subtle) 54%, transparent 55%)" }}
+          />
+        </div>
+        <div className="space-y-2">
+          <LegendRow colorClass="bg-cyan-400" label="USDC" pct={pUsdc} amount={balances.USDC} />
+          <LegendRow colorClass="bg-purple-400" label="EURC" pct={pEurc} amount={balances.EURC} />
+          <LegendRow colorClass="bg-orange-400" label="cirBTC" pct={pCirbtc} amount={balances.cirBTC} />
+        </div>
+      </div>
+    </GlassCard>
+  );
+}
+
+// Buttons for the 4 most common actions, right on the dashboard, so
+// users don't need the sidebar for everyday moves.
+function QuickActionsRow({ setPage }) {
+  const actions = [
+    { label: "Deposit", page: "Deposit", grad: "from-cyan-500 to-cyan-600" },
+    { label: "Withdraw", page: "Withdraw", grad: "from-purple-500 to-purple-600" },
+    { label: "Transfer", page: "Transfer", grad: "from-emerald-500 to-emerald-600" },
+    { label: "Swap", page: "Swap", grad: "from-orange-500 to-orange-600" },
+  ];
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      {actions.map((a) => (
+        <button
+          key={a.page}
+          onClick={() => setPage(a.page)}
+          className={`rounded-xl px-4 py-3 text-sm font-medium text-[var(--text-primary)] bg-gradient-to-r ${a.grad} hover:brightness-110 active:scale-[0.98] transition text-center`}
+        >
+          {a.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Last 4 Activity Centre entries, inline on the dashboard, with a link
+// to the full Activity page. Subscribes the same way ActivityPage does
+// so a fresh action elsewhere in the app updates this list live.
+function RecentActivityPreview({ setPage }) {
+  const [entries, setEntries] = useState(() => readLS(ACTIVITY_LOG_KEY, []));
+
+  useEffect(() => {
+    const onActivity = () => setEntries(readLS(ACTIVITY_LOG_KEY, []));
+    activityListeners.push(onActivity);
+    return () => {
+      activityListeners = activityListeners.filter((fn) => fn !== onActivity);
+    };
+  }, []);
+
+  const recent = entries.slice(0, 4);
+
+  return (
+    <GlassCard className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <span className="text-[var(--text-secondary)] text-sm font-medium">Recent activity</span>
+        <button
+          onClick={() => setPage("Activity")}
+          className="text-[var(--text-muted)] hover:text-[var(--text-soft)] text-xs underline decoration-dotted"
+        >
+          View all
+        </button>
+      </div>
+      {recent.length === 0 ? (
+        <p className="text-[var(--text-faint)] text-sm py-4 text-center">
+          Nothing yet — actions you take will show up here.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {recent.map((entry) => (
+            <div key={entry.id} className="flex items-start justify-between gap-3 bg-[var(--surface-subtle)] rounded-lg px-3 py-2.5">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${entry.tone === "ok" ? "bg-emerald-400" : "bg-rose-400"}`} />
+                  <span className="text-[var(--text-primary)] text-sm font-medium truncate">{entry.title}</span>
+                </div>
+                {entry.message && <p className="text-[var(--text-secondary)] text-xs truncate">{entry.message}</p>}
+              </div>
+              <span className="text-[var(--text-faint)] text-xs shrink-0">{relativeTime(entry.timestamp)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </GlassCard>
+  );
+}
+
+function DashboardPage({ wallet, setPage }) {
   const [balances, setBalances] = useState({ USDC: "—", EURC: "—", cirBTC: "—" });
   const [loading, setLoading] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [lastSynced, setLastSynced] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1679,6 +1809,7 @@ function DashboardPage({ wallet }) {
           EURC: wallet.circleBalances?.EURC ?? "0.00",
           cirBTC: wallet.circleBalances?.cirBTC ?? "0.00",
         });
+        if (!cancelled) setLastSynced(Date.now());
         return;
       }
       if (!wallet.provider || !wallet.address) return;
@@ -1721,7 +1852,10 @@ function DashboardPage({ wallet }) {
         if (!cancelled) setBalances((b) => ({ ...b, cirBTC: "0.00" }));
       }
 
-      if (!cancelled) setLoading(false);
+      if (!cancelled) {
+        setLoading(false);
+        setLastSynced(Date.now());
+      }
     }
     loadBalances();
     return () => {
@@ -1735,6 +1869,8 @@ function DashboardPage({ wallet }) {
   // separately in their own units below since they aren't real USD
   // conversions (especially cirBTC, whose BTC price isn't tracked here).
   const total = hasBalances ? usdcNum : null;
+  const isEmptyWallet =
+    hasBalances && usdcNum === 0 && Number(balances.EURC) === 0 && Number(balances.cirBTC) === 0;
 
   return (
     <div className="space-y-5">
@@ -1770,6 +1906,9 @@ function DashboardPage({ wallet }) {
                 {loading ? "Refreshing…" : "Refresh"}
               </button>
             </div>
+            {lastSynced && (
+              <p className="text-[var(--text-faint)] text-[10px]">Last synced {relativeTime(lastSynced)}</p>
+            )}
             <div className="flex items-center gap-2 justify-end">
               <p className="text-[var(--text-muted)] font-mono text-xs break-all">
                 {wallet.address ?? "Not connected"}
@@ -1780,48 +1919,69 @@ function DashboardPage({ wallet }) {
         </div>
       </GlassCard>
 
-      {/* Individual token cards */}
-      <div className="grid sm:grid-cols-3 gap-4">
-        <GlassCard className="p-6">
-          <div className="flex items-center justify-between mb-5">
-            <span className="text-[var(--text-secondary)] text-sm font-medium">USDC</span>
-            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-cyan-400 to-cyan-600 flex items-center justify-center text-xs font-bold text-[var(--text-primary)]">
-              $
-            </span>
-          </div>
-          {balances.USDC === "—" ? (
-            <Skeleton className="h-9 w-28" />
-          ) : (
-            <p className="text-[var(--text-primary)] text-3xl font-semibold tabular-nums">{balances.USDC}</p>
-          )}
+      {/* Quick actions — the 4 most common moves, no sidebar needed */}
+      <QuickActionsRow setPage={setPage} />
+
+      {isEmptyWallet ? (
+        <GlassCard className="p-8 text-center">
+          <p className="text-[var(--text-primary)] text-base font-medium mb-1">Nothing here yet</p>
+          <p className="text-[var(--text-secondary)] text-sm mb-5 max-w-sm mx-auto">
+            This wallet doesn't hold any USDC, EURC, or cirBTC yet. Fund it with a testnet deposit to get started.
+          </p>
+          <PrimaryButton onClick={() => setPage("Deposit")}>Make a deposit</PrimaryButton>
         </GlassCard>
-        <GlassCard className="p-6">
-          <div className="flex items-center justify-between mb-5">
-            <span className="text-[var(--text-secondary)] text-sm font-medium">EURC</span>
-            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-400 to-purple-600 flex items-center justify-center text-xs font-bold text-[var(--text-primary)]">
-              €
-            </span>
+      ) : (
+        <>
+          {/* Individual token cards */}
+          <div className="grid sm:grid-cols-3 gap-4">
+            <GlassCard className="p-6">
+              <div className="flex items-center justify-between mb-5">
+                <span className="text-[var(--text-secondary)] text-sm font-medium">USDC</span>
+                <span className="w-9 h-9 rounded-full bg-gradient-to-br from-cyan-400 to-cyan-600 flex items-center justify-center text-xs font-bold text-[var(--text-primary)]">
+                  $
+                </span>
+              </div>
+              {balances.USDC === "—" ? (
+                <Skeleton className="h-9 w-28" />
+              ) : (
+                <p className="text-[var(--text-primary)] text-3xl font-semibold tabular-nums">{balances.USDC}</p>
+              )}
+            </GlassCard>
+            <GlassCard className="p-6">
+              <div className="flex items-center justify-between mb-5">
+                <span className="text-[var(--text-secondary)] text-sm font-medium">EURC</span>
+                <span className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-400 to-purple-600 flex items-center justify-center text-xs font-bold text-[var(--text-primary)]">
+                  €
+                </span>
+              </div>
+              {balances.EURC === "—" ? (
+                <Skeleton className="h-9 w-28" />
+              ) : (
+                <p className="text-[var(--text-primary)] text-3xl font-semibold tabular-nums">{balances.EURC}</p>
+              )}
+            </GlassCard>
+            <GlassCard className="p-6">
+              <div className="flex items-center justify-between mb-5">
+                <span className="text-[var(--text-secondary)] text-sm font-medium">cirBTC</span>
+                <span className="w-9 h-9 rounded-full bg-gradient-to-br from-orange-400 to-orange-600 flex items-center justify-center text-xs font-bold text-[var(--text-primary)]">
+                  ₿
+                </span>
+              </div>
+              {balances.cirBTC === "—" ? (
+                <Skeleton className="h-9 w-28" />
+              ) : (
+                <p className="text-[var(--text-primary)] text-3xl font-semibold tabular-nums">{balances.cirBTC}</p>
+              )}
+            </GlassCard>
           </div>
-          {balances.EURC === "—" ? (
-            <Skeleton className="h-9 w-28" />
-          ) : (
-            <p className="text-[var(--text-primary)] text-3xl font-semibold tabular-nums">{balances.EURC}</p>
-          )}
-        </GlassCard>
-        <GlassCard className="p-6">
-          <div className="flex items-center justify-between mb-5">
-            <span className="text-[var(--text-secondary)] text-sm font-medium">cirBTC</span>
-            <span className="w-9 h-9 rounded-full bg-gradient-to-br from-orange-400 to-orange-600 flex items-center justify-center text-xs font-bold text-[var(--text-primary)]">
-              ₿
-            </span>
+
+          {/* Token mix donut + recent activity preview, side by side */}
+          <div className="grid md:grid-cols-2 gap-4">
+            <TokenAllocationDonut balances={balances} />
+            <RecentActivityPreview setPage={setPage} />
           </div>
-          {balances.cirBTC === "—" ? (
-            <Skeleton className="h-9 w-28" />
-          ) : (
-            <p className="text-[var(--text-primary)] text-3xl font-semibold tabular-nums">{balances.cirBTC}</p>
-          )}
-        </GlassCard>
-      </div>
+        </>
+      )}
     </div>
   );
 }
@@ -4458,7 +4618,7 @@ export default function ArcTestnetDApp() {
 
   const pageEl = useMemo(() => {
     switch (page) {
-      case "Dashboard": return <DashboardPage wallet={effectiveWallet} />;
+      case "Dashboard": return <DashboardPage wallet={effectiveWallet} setPage={setPage} />;
       case "Transfer": return <TransferPage wallet={effectiveWallet} />;
       case "Bulk Transfer": return <BulkTransferPage wallet={effectiveWallet} />;
       case "Swap": return <SwapPage wallet={effectiveWallet} />;
