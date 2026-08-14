@@ -301,6 +301,24 @@ const LS_KEYS = {
   nftLocks: "arc_nft_locks",
 };
 
+// Render's free tier spins down after inactivity and can take 50+ seconds
+// to wake back up on the first request. Both session-restore checks below
+// gate the ENTIRE app behind a full-screen "Loading…" state, so without a
+// cap, a cold backend leaves the person staring at a blank screen with no
+// way out except reloading — which just restarts the same slow wait.
+// SESSION_CHECK_TIMEOUT_MS bounds that: if the check hasn't resolved in
+// time, callers fall through to "couldn't verify right now" instead of
+// hanging, and deliberately do NOT treat that as "session is invalid" —
+// the stored session is left alone so a later, successful check can still
+// log the person back in automatically.
+const SESSION_CHECK_TIMEOUT_MS = 10000;
+function withTimeout(promise, ms = SESSION_CHECK_TIMEOUT_MS) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+  ]);
+}
+
 function readLS(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -652,11 +670,14 @@ function useAuth(wallet) {
     }
     let cancelled = false;
     (async () => {
+      let timedOut = false;
       try {
         const { token, address, connectorId } = JSON.parse(raw);
-        const res = await fetch(`${API_BASE}/auth/session`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const res = await withTimeout(
+          fetch(`${API_BASE}/auth/session`, {
+            headers: { Authorization: `Bearer ${token}` },
+          })
+        );
         if (!res.ok) throw new Error("expired");
         if (cancelled) return;
         setSessionAddress(address);
@@ -674,8 +695,13 @@ function useAuth(wallet) {
             await walletRef.current.connect(connectorId, { silent: true });
           }, 800);
         }
-      } catch {
-        localStorage.removeItem(SESSION_STORAGE_KEY);
+      } catch (e) {
+        timedOut = e?.message === "timeout";
+        // A slow/cold-starting backend isn't the same as an invalid
+        // session — only clear the stored session when the backend
+        // actually told us it's expired, not when we simply couldn't
+        // reach it in time.
+        if (!timedOut) localStorage.removeItem(SESSION_STORAGE_KEY);
         if (!cancelled) setStatus("loggedOut");
       }
     })();
@@ -917,7 +943,7 @@ function useCircleWallet() {
       const session = JSON.parse(raw);
       sessionRef.current = session;
       setStatus("working");
-      loadWalletAndBalance(session.userToken)
+      withTimeout(loadWalletAndBalance(session.userToken))
         .then((w) => {
           setStatus(w ? "ready" : "idle");
           setRestoringSession(false);
@@ -927,8 +953,15 @@ function useCircleWallet() {
           // a genuine fresh sign-in in the sheet/GA4.
           if (w) logLoginEvent(w.address, "circle-restore");
         })
-        .catch(() => {
-          localStorage.removeItem(CIRCLE_SESSION_STORAGE_KEY);
+        .catch((e) => {
+          // A slow/cold-starting backend isn't the same as an invalid
+          // session — only clear the stored session on a real failure,
+          // not because the check simply didn't finish in time. Leaving
+          // it in place means the *next* reload can still restore it
+          // once the backend's actually awake.
+          if (e?.message !== "timeout") {
+            localStorage.removeItem(CIRCLE_SESSION_STORAGE_KEY);
+          }
           setStatus("idle");
           setRestoringSession(false);
         });
@@ -1914,11 +1947,38 @@ function DashboardPage({ wallet, setPage }) {
         setLastSynced(Date.now());
       }
     }
-    loadBalances();
+    // A safety net, not the normal path: withRpcRetry already handles
+    // rate limits and flaky responses with bounded retries, so loadBalances
+    // normally always resolves on its own, one way or another. This only
+    // matters if a single RPC call truly hangs (connection open, server
+    // never responds) rather than failing — without a ceiling, `loading`
+    // would stay stuck true forever, and since the 10s auto-refresh skips
+    // ticks while loading is true, it would silently stop updating with
+    // no visible error. 45s is well above the worst-case legitimate
+    // retry/backoff duration (~40s), so it only fires on a genuine stall.
+    withTimeout(loadBalances(), 45000).catch(() => {
+      if (!cancelled) setLoading(false);
+    });
     return () => {
       cancelled = true;
     };
   }, [wallet.provider, wallet.address, wallet.isCircleWallet, wallet.circleBalance, wallet.circleBalances, refreshKey]);
+
+  // Auto-refresh every 10s. Uses a ref (not `loading` in the deps array)
+  // so the interval itself never restarts mid-countdown — it just skips a
+  // tick if the previous refresh is still in flight, instead of piling
+  // requests on top of Arc Testnet's rate-limited public RPC.
+  const loadingRef = useRef(loading);
+  useEffect(() => {
+    loadingRef.current = loading;
+  }, [loading]);
+  useEffect(() => {
+    if (!wallet.address) return;
+    const id = setInterval(() => {
+      if (!loadingRef.current) setRefreshKey((k) => k + 1);
+    }, 10000);
+    return () => clearInterval(id);
+  }, [wallet.address]);
 
   const usdcNum = Number(balances.USDC);
   const hasBalances = balances.USDC !== "—" && !Number.isNaN(usdcNum);
@@ -2701,16 +2761,23 @@ function BridgePage({ wallet }) {
       </p>
 
       <label className="text-[var(--text-secondary)] text-xs">From</label>
-      <select
-        value={sourceKey}
-        onChange={(e) => setSourceKey(e.target.value)}
-        disabled={busy}
-        className="w-full mt-1 mb-3 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
-      >
+      <div className="grid grid-cols-3 gap-2 mt-1 mb-3">
         {Object.entries(BRIDGE_SOURCE_CHAINS).map(([key, cfg]) => (
-          <option key={key} value={key}>{cfg.label}</option>
+          <button
+            key={key}
+            type="button"
+            onClick={() => setSourceKey(key)}
+            disabled={busy}
+            className={`px-2 py-2.5 rounded-lg text-xs font-medium border transition text-center disabled:opacity-50 disabled:cursor-not-allowed ${
+              sourceKey === key
+                ? "bg-gradient-to-r from-cyan-500/20 to-purple-600/20 border-cyan-400 text-[var(--text-primary)]"
+                : "bg-[var(--surface-subtle)] border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--border-strong)]"
+            }`}
+          >
+            {cfg.label}
+          </button>
         ))}
-      </select>
+      </div>
 
       <details className="mb-4 group">
         <summary className="text-xs text-cyan-300/80 cursor-pointer select-none hover:text-cyan-300">
@@ -4863,6 +4930,13 @@ export default function ArcTestnetDApp() {
   const circleWallet = useCircleWallet();
   const [page, setPage] = useState("Dashboard");
   const [showLanding, setShowLanding] = useState(true);
+  // Session checks usually resolve in well under a second — showing
+  // "Loading…" immediately for those just adds a flash of black screen
+  // for no reason. Delaying the text by 400ms means fast checks go
+  // straight to real content with nothing shown in between, while slower
+  // ones (a cold backend) still get a visible "something's happening"
+  // instead of looking frozen.
+  const [showLoadingText, setShowLoadingText] = useState(false);
   const [showWelcome, setShowWelcome] = useState(false);
   const [showTour, setShowTour] = useState(false);
 
@@ -4898,6 +4972,16 @@ export default function ArcTestnetDApp() {
 
   const isLoggedInViaCircle = circleWallet.status === "ready" && !!circleWallet.address;
   const isLoggedIn = auth.status === "authenticated" || isLoggedInViaCircle;
+
+  const isCheckingSession = auth.status === "checking" || circleWallet.restoringSession;
+  useEffect(() => {
+    if (!isCheckingSession) {
+      setShowLoadingText(false);
+      return;
+    }
+    const t = setTimeout(() => setShowLoadingText(true), 400);
+    return () => clearTimeout(t);
+  }, [isCheckingSession]);
 
   // A single shape every page reads from, regardless of which login path
   // was used. Circle-wallet users get `provider: null` and `isCircleWallet:
@@ -4965,10 +5049,10 @@ export default function ArcTestnetDApp() {
     }
   }, [page, effectiveWallet]);
 
-  if (auth.status === "checking" || circleWallet.restoringSession) {
+  if (isCheckingSession) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[var(--bg-base)]">
-        <p className="text-[var(--text-muted)] text-sm">Loading…</p>
+        {showLoadingText && <p className="text-[var(--text-muted)] text-sm">Loading…</p>}
       </div>
     );
   }
