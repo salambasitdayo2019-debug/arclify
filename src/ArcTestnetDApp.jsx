@@ -299,6 +299,7 @@ const LS_KEYS = {
   txs: "arc_txs",
   bulk: "arc_bulk",
   nftLocks: "arc_nft_locks",
+  payrollVaults: "arclify_payroll_vaults",
 };
 
 // Render's free tier spins down after inactivity and can take 50+ seconds
@@ -1740,6 +1741,7 @@ const NAV_ITEMS = [
   "Bridge",
   "Lending",
   "NFT Lock",
+  "Agent Payroll",
   "Activity",
   "History",
   "Leaderboard",
@@ -2315,6 +2317,439 @@ function BulkTransferPage({ wallet }) {
           ))}
         </div>
       )}
+    </GlassCard>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Page: Agent Payroll — chat-style front end over vaults, contractors, */
+/*  and payroll runs. The 8 quick actions are deterministic and need no  */
+/*  AI at all; free-text goes to /api/payroll-chat (Gemini function-     */
+/*  calling), which picks one of the same actions. Read actions (check   */
+/*  balance, list contractors, etc.) execute immediately either way.     */
+/*  Anything that creates data or moves money — even when the AI         */
+/*  proposed it — always opens the matching form instead of running      */
+/*  straight away, so a person always explicitly confirms before real    */
+/*  USDC moves.                                                          */
+/* ------------------------------------------------------------------ */
+
+function readVaults() {
+  return readLS(LS_KEYS.payrollVaults, []);
+}
+function writeVaults(vaults) {
+  writeLS(LS_KEYS.payrollVaults, vaults);
+}
+
+function AgentPayrollPage({ wallet }) {
+  const [vaults, setVaults] = useState(() => readVaults());
+  const [activeVaultId, setActiveVaultId] = useState(() => readVaults()[0]?.id ?? null);
+  const [messages, setMessages] = useState([
+    {
+      id: "welcome",
+      role: "assistant",
+      text: 'I can help you manage USDC payroll on Arc Testnet — create vaults, add contractors, and run payments.\n\nWhat would you like to do?',
+    },
+  ]);
+  const [pendingForm, setPendingForm] = useState(null);
+  const [inputText, setInputText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, pendingForm]);
+
+  const activeVault = vaults.find((v) => v.id === activeVaultId) || null;
+
+  const say = (text) => setMessages((m) => [...m, { id: crypto.randomUUID(), role: "assistant", text }]);
+  const sayUser = (text) => setMessages((m) => [...m, { id: crypto.randomUUID(), role: "user", text }]);
+
+  const actionCreateVault = (name) => {
+    const vault = { id: crypto.randomUUID(), name, contractors: [], createdAt: Date.now() };
+    const next = [...vaults, vault];
+    setVaults(next);
+    writeVaults(next);
+    setActiveVaultId(vault.id);
+    say(`Created vault "${name}" and switched to it. Add some contractors next, or run payroll once you have some.`);
+  };
+
+  const actionShowVaults = () => {
+    if (vaults.length === 0) {
+      say("You don't have any vaults yet — create one first.");
+      return;
+    }
+    const lines = vaults.map(
+      (v) => `• ${v.name}${v.id === activeVaultId ? " (active)" : ""} — ${v.contractors.length} contractor${v.contractors.length === 1 ? "" : "s"}`
+    );
+    say(`Your vaults:\n${lines.join("\n")}`);
+  };
+
+  const actionAddContractor = (name, address) => {
+    if (!activeVault) {
+      say("You need an active vault first — create one, or switch to an existing one.");
+      return;
+    }
+    if (!ethers.isAddress(address)) {
+      say(`"${address}" isn't a valid address — double check it and try again.`);
+      return;
+    }
+    const contractor = { id: crypto.randomUUID(), name, address };
+    const next = vaults.map((v) => (v.id === activeVault.id ? { ...v, contractors: [...v.contractors, contractor] } : v));
+    setVaults(next);
+    writeVaults(next);
+    say(`Added ${name} (${address.slice(0, 10)}…) to "${activeVault.name}".`);
+  };
+
+  const actionListContractors = () => {
+    if (!activeVault) {
+      say("No active vault — create one or switch to one first.");
+      return;
+    }
+    if (activeVault.contractors.length === 0) {
+      say(`"${activeVault.name}" has no contractors yet.`);
+      return;
+    }
+    const lines = activeVault.contractors.map((c) => `• ${c.name} — ${c.address.slice(0, 10)}…`);
+    say(`Contractors in "${activeVault.name}":\n${lines.join("\n")}`);
+  };
+
+  const actionCheckBalance = async () => {
+    say("Checking your wallet balance…");
+    try {
+      let usdc = "0.00";
+      if (wallet.isCircleWallet) {
+        usdc = wallet.circleBalances?.USDC ?? wallet.circleBalance ?? "0.00";
+      } else if (wallet.provider && wallet.address) {
+        const bal = await withRpcRetry(() => wallet.provider.getBalance(wallet.address));
+        usdc = ethers.formatUnits(bal, NATIVE_BALANCE_DECIMALS);
+      }
+      say(`Your current balance is ${Number(usdc).toFixed(4)} USDC.`);
+    } catch (e) {
+      say(`Couldn't check your balance right now: ${e.message}`);
+    }
+  };
+
+  const actionSwitchVault = (vaultId) => {
+    const v = vaults.find((x) => x.id === vaultId);
+    if (!v) {
+      say("Couldn't find that vault.");
+      return;
+    }
+    setActiveVaultId(v.id);
+    say(`Switched to "${v.name}".`);
+  };
+
+  const actionShowHistory = () => {
+    const log = readLS(ACTIVITY_LOG_KEY, []);
+    const payrollEntries = log.filter((e) => e.category === "Agent Payroll").slice(0, 8);
+    if (payrollEntries.length === 0) {
+      say("No payroll runs yet.");
+      return;
+    }
+    const lines = payrollEntries.map((e) => `• ${e.title} — ${relativeTime(e.timestamp)}`);
+    say(`Recent payroll activity:\n${lines.join("\n")}`);
+  };
+
+  // The one real money-moving action. Loops the same per-recipient send
+  // TransferPage already uses for both wallet types, one at a time, so a
+  // Circle wallet gets its normal per-send PIN confirmation on each
+  // payment rather than one confirmation covering the whole batch.
+  const actionRunPayroll = async (token, amountPerContractor) => {
+    if (!activeVault || activeVault.contractors.length === 0) {
+      say("Your active vault has no contractors to pay.");
+      return;
+    }
+    setBusy(true);
+    say(`Running payroll: ${amountPerContractor} ${token} to each of ${activeVault.contractors.length} contractor(s) in "${activeVault.name}"…`);
+    let succeeded = 0;
+    let failed = 0;
+    const results = [];
+    for (const c of activeVault.contractors) {
+      try {
+        if (wallet.isCircleWallet) {
+          const tokenAddress = token === NATIVE_TOKEN_SYMBOL ? undefined : CONTRACTS[token];
+          await wallet.circleSendTransfer({ to: c.address, amount: amountPerContractor, tokenAddress });
+        } else {
+          if (!wallet.provider) throw new Error("Wallet not connected.");
+          const signer = await wallet.provider.getSigner();
+          if (token === NATIVE_TOKEN_SYMBOL) {
+            const tx = await signer.sendTransaction({ to: c.address, value: ethers.parseUnits(amountPerContractor, NATIVE_BALANCE_DECIMALS) });
+            await tx.wait();
+          } else {
+            const contract = new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
+            const tx = await contract.transfer(c.address, ethers.parseUnits(amountPerContractor, TOKEN_DECIMALS[token]));
+            await tx.wait();
+          }
+        }
+        succeeded++;
+        results.push(`✓ ${c.name}`);
+      } catch (e) {
+        failed++;
+        results.push(`✗ ${c.name}: ${e.shortMessage || e.message}`);
+      }
+    }
+    writeLS(ACTIVITY_LOG_KEY, [
+      {
+        id: crypto.randomUUID(),
+        category: "Agent Payroll",
+        tone: failed === 0 ? "ok" : succeeded === 0 ? "bad" : "warn",
+        title: `Payroll run — ${activeVault.name}`,
+        message: `${succeeded} paid, ${failed} failed (${amountPerContractor} ${token} each)`,
+        timestamp: Date.now(),
+      },
+      ...readLS(ACTIVITY_LOG_KEY, []),
+    ].slice(0, ACTIVITY_LOG_MAX_ENTRIES));
+    toast({
+      category: "Agent Payroll",
+      tone: failed === 0 ? "ok" : succeeded === 0 ? "bad" : "warn",
+      title: "Payroll run complete",
+      message: `${succeeded} paid, ${failed} failed — ${activeVault.name}`,
+    });
+    say(`Payroll run finished:\n${results.join("\n")}`);
+    setBusy(false);
+  };
+
+  const QUICK_ACTIONS = [
+    { label: "Create my payroll vault", onClick: () => setPendingForm({ type: "createVault", name: "" }) },
+    { label: "Show my vaults", onClick: actionShowVaults },
+    { label: "Add a contractor", onClick: () => setPendingForm({ type: "addContractor", name: "", address: "" }) },
+    { label: "Check vault balance", onClick: actionCheckBalance },
+    { label: "List my contractors", onClick: actionListContractors },
+    { label: "Run payroll for all", onClick: () => setPendingForm({ type: "runPayroll", token: "USDC", amount: "" }) },
+    { label: "Switch vault", onClick: () => setPendingForm({ type: "switchVault" }) },
+    { label: "Show payment history", onClick: actionShowHistory },
+  ];
+
+  // Maps a Gemini tool call onto the SAME forms/actions the buttons use.
+  // Read-only calls execute immediately; anything that creates data or
+  // moves money opens the matching form pre-filled instead of running
+  // straight away — the AI proposes, the person still has to confirm.
+  const applyToolCall = (toolCall) => {
+    const { name, args = {} } = toolCall || {};
+    switch (name) {
+      case "show_vaults": return actionShowVaults();
+      case "list_contractors": return actionListContractors();
+      case "check_balance": return actionCheckBalance();
+      case "show_history": return actionShowHistory();
+      case "create_vault": return setPendingForm({ type: "createVault", name: args.name || "" });
+      case "add_contractor": return setPendingForm({ type: "addContractor", name: args.name || "", address: args.address || "" });
+      case "run_payroll": return setPendingForm({ type: "runPayroll", token: args.token || "USDC", amount: args.amount || "" });
+      case "switch_vault": {
+        const match = vaults.find((v) => v.name.toLowerCase() === (args.vaultName || "").toLowerCase());
+        return setPendingForm({ type: "switchVault", suggestedId: match?.id ?? null });
+      }
+      default: say("I wasn't sure how to do that — try one of the buttons below.");
+    }
+  };
+
+  const sendFreeText = async () => {
+    const text = inputText.trim();
+    if (!text || busy) return;
+    sayUser(text);
+    setInputText("");
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/payroll-chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: text,
+          context: {
+            activeVaultName: activeVault?.name ?? null,
+            vaults: vaults.map((v) => ({ name: v.name, contractorCount: v.contractors.length })),
+          },
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        say(data.error || "Something went wrong reaching the AI.");
+        return;
+      }
+      if (data.reply) say(data.reply);
+      if (data.toolCall) applyToolCall(data.toolCall);
+    } catch {
+      say("Couldn't reach the AI backend — you can still use the buttons below.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <GlassCard className="p-0 max-w-2xl overflow-hidden flex flex-col h-[560px]">
+      <div className="px-5 py-4 border-b border-[var(--border-subtle)]">
+        <h2 className="text-[var(--text-primary)] text-base font-semibold">Agent Payroll</h2>
+        <p className="text-[var(--text-faint)] text-xs mt-0.5">
+          {activeVault ? `Active vault: ${activeVault.name}` : "No active vault yet"}
+        </p>
+      </div>
+
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+        {messages.map((m) => (
+          <div key={m.id} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+            <div
+              className={`max-w-[80%] rounded-xl px-3.5 py-2.5 text-sm whitespace-pre-line ${
+                m.role === "user"
+                  ? "bg-gradient-to-r from-cyan-500 to-purple-600 text-white"
+                  : "bg-[var(--surface-subtle)] text-[var(--text-primary)]"
+              }`}
+            >
+              {m.text}
+            </div>
+          </div>
+        ))}
+
+        {pendingForm?.type === "createVault" && (
+          <div className="bg-[var(--surface-subtle)] rounded-xl p-4 space-y-3">
+            <p className="text-[var(--text-secondary)] text-xs">Vault name</p>
+            <input
+              autoFocus
+              value={pendingForm.name}
+              onChange={(e) => setPendingForm({ ...pendingForm, name: e.target.value })}
+              placeholder="e.g. Engineering team"
+              className="w-full bg-[var(--surface)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
+            />
+            <div className="flex gap-2">
+              <PrimaryButton
+                disabled={!pendingForm.name.trim()}
+                onClick={() => { actionCreateVault(pendingForm.name.trim()); setPendingForm(null); }}
+              >
+                Create
+              </PrimaryButton>
+              <button onClick={() => setPendingForm(null)} className="text-[var(--text-muted)] text-sm">Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {pendingForm?.type === "addContractor" && (
+          <div className="bg-[var(--surface-subtle)] rounded-xl p-4 space-y-3">
+            {!activeVault ? (
+              <p className="text-rose-300 text-xs">Create or switch to a vault first.</p>
+            ) : (
+              <>
+                <p className="text-[var(--text-secondary)] text-xs">Adding to "{activeVault.name}"</p>
+                <input
+                  autoFocus
+                  value={pendingForm.name}
+                  onChange={(e) => setPendingForm({ ...pendingForm, name: e.target.value })}
+                  placeholder="Contractor name"
+                  className="w-full bg-[var(--surface)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
+                />
+                <input
+                  value={pendingForm.address}
+                  onChange={(e) => setPendingForm({ ...pendingForm, address: e.target.value })}
+                  placeholder="0x..."
+                  className="w-full bg-[var(--surface)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] font-mono text-sm"
+                />
+                <div className="flex gap-2">
+                  <PrimaryButton
+                    disabled={!pendingForm.name.trim() || !pendingForm.address.trim()}
+                    onClick={() => { actionAddContractor(pendingForm.name.trim(), pendingForm.address.trim()); setPendingForm(null); }}
+                  >
+                    Add
+                  </PrimaryButton>
+                  <button onClick={() => setPendingForm(null)} className="text-[var(--text-muted)] text-sm">Cancel</button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {pendingForm?.type === "switchVault" && (
+          <div className="bg-[var(--surface-subtle)] rounded-xl p-4 space-y-2">
+            {vaults.length === 0 ? (
+              <p className="text-[var(--text-secondary)] text-xs">No vaults yet — create one first.</p>
+            ) : (
+              vaults.map((v) => (
+                <button
+                  key={v.id}
+                  onClick={() => { actionSwitchVault(v.id); setPendingForm(null); }}
+                  className="w-full text-left px-3 py-2 rounded-lg bg-[var(--surface)] hover:bg-[var(--border-subtle)] text-[var(--text-primary)] text-sm"
+                >
+                  {v.name} · {v.contractors.length} contractor{v.contractors.length === 1 ? "" : "s"}
+                </button>
+              ))
+            )}
+            <button onClick={() => setPendingForm(null)} className="text-[var(--text-muted)] text-sm">Cancel</button>
+          </div>
+        )}
+
+        {pendingForm?.type === "runPayroll" && (
+          <div className="bg-[var(--surface-subtle)] rounded-xl p-4 space-y-3">
+            {!activeVault || activeVault.contractors.length === 0 ? (
+              <p className="text-rose-300 text-xs">Your active vault needs at least one contractor before you can run payroll.</p>
+            ) : (
+              <>
+                <p className="text-amber-300 text-xs">
+                  This pays {activeVault.contractors.length} contractor(s) in "{activeVault.name}" — real testnet USDC will move on-chain.
+                </p>
+                <div className="flex gap-2">
+                  <select
+                    value={pendingForm.token}
+                    onChange={(e) => setPendingForm({ ...pendingForm, token: e.target.value })}
+                    className="bg-[var(--surface)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
+                  >
+                    <option value="USDC">USDC</option>
+                    <option value="EURC">EURC</option>
+                    <option value="cirBTC">cirBTC</option>
+                  </select>
+                  <input
+                    value={pendingForm.amount}
+                    onChange={(e) => setPendingForm({ ...pendingForm, amount: e.target.value })}
+                    placeholder="Amount each"
+                    className="flex-1 bg-[var(--surface)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <PrimaryButton
+                    disabled={!pendingForm.amount || busy}
+                    onClick={async () => {
+                      const { token, amount } = pendingForm;
+                      setPendingForm(null);
+                      await actionRunPayroll(token, amount);
+                    }}
+                  >
+                    Confirm & pay all
+                  </PrimaryButton>
+                  <button onClick={() => setPendingForm(null)} className="text-[var(--text-muted)] text-sm">Cancel</button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="px-5 py-3 border-t border-[var(--border-subtle)]">
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {QUICK_ACTIONS.map((a) => (
+            <button
+              key={a.label}
+              onClick={a.onClick}
+              disabled={busy}
+              className="text-xs px-2.5 py-1.5 rounded-full border border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)] disabled:opacity-50 transition"
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <input
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && sendFreeText()}
+            placeholder="Message Agent Payroll…"
+            disabled={busy}
+            className="flex-1 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm disabled:opacity-50"
+          />
+          <button
+            onClick={sendFreeText}
+            disabled={busy || !inputText.trim()}
+            className="w-10 h-10 rounded-lg bg-gradient-to-r from-cyan-500 to-purple-600 flex items-center justify-center text-white disabled:opacity-40 shrink-0"
+            aria-label="Send"
+          >
+            →
+          </button>
+        </div>
+      </div>
     </GlassCard>
   );
 }
@@ -5028,6 +5463,7 @@ export default function ArcTestnetDApp() {
       case "Dashboard": return <DashboardPage wallet={effectiveWallet} setPage={setPage} />;
       case "Transfer": return <TransferPage wallet={effectiveWallet} />;
       case "Bulk Transfer": return <BulkTransferPage wallet={effectiveWallet} />;
+      case "Agent Payroll": return <AgentPayrollPage wallet={effectiveWallet} />;
       case "Swap": return <SwapPage wallet={effectiveWallet} />;
       case "Bridge": return <BridgePage wallet={effectiveWallet} />;
       case "Lending": return <LendingPage wallet={effectiveWallet} />;
