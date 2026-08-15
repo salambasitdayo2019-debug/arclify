@@ -20,6 +20,7 @@ import circleWalletsRoute from "./circleWalletsRoute.js";
 import bridgeRoute from "./bridgeRoute.js";
 import offRampRoute from "./offRampRoute.js";
 import analyticsRoute from "./analyticsRoute.js";
+import payrollChatRoute from "./payrollChatRoute.js";
 
 dotenv.config();
 
@@ -40,6 +41,12 @@ if (!process.env.CIRCLE_API_KEY) {
     "Warning: CIRCLE_API_KEY is not set. Circle Wallets sign-in (/api/circle/*) will fail until it's set in .env."
   );
 }
+if (!process.env.GEMINI_API_KEY) {
+  console.warn(
+    "Warning: GEMINI_API_KEY is not set. Agent Payroll's free-text chat (/api/payroll-chat) will fail soft " +
+    "(a message telling the user AI chat isn't set up) until it's set — the quick-action buttons work regardless."
+  );
+}
 
 const app = express();
 
@@ -56,6 +63,7 @@ app.use("/api", circleWalletsRoute);
 app.use("/api", bridgeRoute);
 app.use("/api", offRampRoute);
 app.use("/api", analyticsRoute);
+app.use("/api", payrollChatRoute);
 
 // Fallback error handler so a thrown error doesn't crash the process
 app.use((err, _req, res, _next) => {
