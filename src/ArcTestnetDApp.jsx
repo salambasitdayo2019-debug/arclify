@@ -299,7 +299,6 @@ const LS_KEYS = {
   txs: "arc_txs",
   bulk: "arc_bulk",
   nftLocks: "arc_nft_locks",
-  payrollVaults: "arclify_payroll_vaults",
 };
 
 // Render's free tier spins down after inactivity and can take 50+ seconds
@@ -2333,16 +2332,10 @@ function BulkTransferPage({ wallet }) {
 /*  USDC moves.                                                          */
 /* ------------------------------------------------------------------ */
 
-function readVaults() {
-  return readLS(LS_KEYS.payrollVaults, []);
-}
-function writeVaults(vaults) {
-  writeLS(LS_KEYS.payrollVaults, vaults);
-}
-
 function AgentPayrollPage({ wallet }) {
-  const [vaults, setVaults] = useState(() => readVaults());
-  const [activeVaultId, setActiveVaultId] = useState(() => readVaults()[0]?.id ?? null);
+  const [vaults, setVaults] = useState([]);
+  const [contractorsByVault, setContractorsByVault] = useState({});
+  const [activeVaultId, setActiveVaultId] = useState(null);
   const [messages, setMessages] = useState([
     {
       id: "welcome",
@@ -2364,13 +2357,58 @@ function AgentPayrollPage({ wallet }) {
   const say = (text) => setMessages((m) => [...m, { id: crypto.randomUUID(), role: "assistant", text }]);
   const sayUser = (text) => setMessages((m) => [...m, { id: crypto.randomUUID(), role: "user", text }]);
 
-  const actionCreateVault = (name) => {
-    const vault = { id: crypto.randomUUID(), name, contractors: [], createdAt: Date.now() };
-    const next = [...vaults, vault];
-    setVaults(next);
-    writeVaults(next);
-    setActiveVaultId(vault.id);
-    say(`Created vault "${name}" and switched to it. Add some contractors next, or run payroll once you have some.`);
+  // Vaults now live in Postgres (Neon), keyed by the connected wallet's
+  // address rather than browser localStorage — same data on any device,
+  // survives clearing site data. Loaded once per wallet on mount.
+  useEffect(() => {
+    if (!wallet.address) return;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/payroll/vaults?owner=${encodeURIComponent(wallet.address)}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          say(data.error || "Couldn't load your vaults right now.");
+          return;
+        }
+        setVaults(data.vaults);
+        setActiveVaultId((cur) => cur ?? data.vaults[0]?.id ?? null);
+      } catch {
+        say("Couldn't reach the backend to load your vaults — try refreshing the page.");
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wallet.address]);
+
+  // Contractor lists are fetched on demand rather than bundled with every
+  // vault, and cached per vault — `force` bypasses the cache for the one
+  // place that actually needs a guaranteed-fresh list (running payroll).
+  const fetchContractors = async (vaultId, { force = false } = {}) => {
+    if (!force && contractorsByVault[vaultId]) return contractorsByVault[vaultId];
+    const res = await fetch(`${API_BASE}/payroll/vaults/${vaultId}/contractors?owner=${encodeURIComponent(wallet.address)}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Couldn't load contractors.");
+    setContractorsByVault((m) => ({ ...m, [vaultId]: data.contractors }));
+    return data.contractors;
+  };
+
+  const actionCreateVault = async (name) => {
+    try {
+      const res = await fetch(`${API_BASE}/payroll/vaults`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ owner: wallet.address, name }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        say(data.error || "Couldn't create the vault.");
+        return;
+      }
+      setVaults((v) => [...v, data.vault]);
+      setActiveVaultId(data.vault.id);
+      say(`Created vault "${name}" and switched to it. Add some contractors next, or run payroll once you have some.`);
+    } catch {
+      say("Couldn't reach the backend — try again in a moment.");
+    }
   };
 
   const actionShowVaults = () => {
@@ -2379,12 +2417,12 @@ function AgentPayrollPage({ wallet }) {
       return;
     }
     const lines = vaults.map(
-      (v) => `• ${v.name}${v.id === activeVaultId ? " (active)" : ""} — ${v.contractors.length} contractor${v.contractors.length === 1 ? "" : "s"}`
+      (v) => `• ${v.name}${v.id === activeVaultId ? " (active)" : ""} — ${v.contractorCount} contractor${v.contractorCount === 1 ? "" : "s"}`
     );
     say(`Your vaults:\n${lines.join("\n")}`);
   };
 
-  const actionAddContractor = (name, address) => {
+  const actionAddContractor = async (name, address) => {
     if (!activeVault) {
       say("You need an active vault first — create one, or switch to an existing one.");
       return;
@@ -2393,24 +2431,41 @@ function AgentPayrollPage({ wallet }) {
       say(`"${address}" isn't a valid address — double check it and try again.`);
       return;
     }
-    const contractor = { id: crypto.randomUUID(), name, address };
-    const next = vaults.map((v) => (v.id === activeVault.id ? { ...v, contractors: [...v.contractors, contractor] } : v));
-    setVaults(next);
-    writeVaults(next);
-    say(`Added ${name} (${address.slice(0, 10)}…) to "${activeVault.name}".`);
+    try {
+      const res = await fetch(`${API_BASE}/payroll/vaults/${activeVault.id}/contractors`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ owner: wallet.address, name, address }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        say(data.error || "Couldn't add that contractor.");
+        return;
+      }
+      setContractorsByVault((m) => ({ ...m, [activeVault.id]: [...(m[activeVault.id] || []), data.contractor] }));
+      setVaults((vs) => vs.map((v) => (v.id === activeVault.id ? { ...v, contractorCount: v.contractorCount + 1 } : v)));
+      say(`Added ${name} (${address.slice(0, 10)}…) to "${activeVault.name}".`);
+    } catch {
+      say("Couldn't reach the backend — try again in a moment.");
+    }
   };
 
-  const actionListContractors = () => {
+  const actionListContractors = async () => {
     if (!activeVault) {
       say("No active vault — create one or switch to one first.");
       return;
     }
-    if (activeVault.contractors.length === 0) {
-      say(`"${activeVault.name}" has no contractors yet.`);
-      return;
+    try {
+      const list = await fetchContractors(activeVault.id);
+      if (list.length === 0) {
+        say(`"${activeVault.name}" has no contractors yet.`);
+        return;
+      }
+      const lines = list.map((c) => `• ${c.name} — ${c.address.slice(0, 10)}…`);
+      say(`Contractors in "${activeVault.name}":\n${lines.join("\n")}`);
+    } catch (e) {
+      say(e.message || "Couldn't load contractors right now.");
     }
-    const lines = activeVault.contractors.map((c) => `• ${c.name} — ${c.address.slice(0, 10)}…`);
-    say(`Contractors in "${activeVault.name}":\n${lines.join("\n")}`);
   };
 
   const actionCheckBalance = async () => {
@@ -2455,16 +2510,27 @@ function AgentPayrollPage({ wallet }) {
   // Circle wallet gets its normal per-send PIN confirmation on each
   // payment rather than one confirmation covering the whole batch.
   const actionRunPayroll = async (token, amountPerContractor) => {
-    if (!activeVault || activeVault.contractors.length === 0) {
+    if (!activeVault) {
+      say("Your active vault has no contractors to pay.");
+      return;
+    }
+    let contractors;
+    try {
+      contractors = await fetchContractors(activeVault.id, { force: true });
+    } catch (e) {
+      say(e.message || "Couldn't load contractors for this vault.");
+      return;
+    }
+    if (!contractors || contractors.length === 0) {
       say("Your active vault has no contractors to pay.");
       return;
     }
     setBusy(true);
-    say(`Running payroll: ${amountPerContractor} ${token} to each of ${activeVault.contractors.length} contractor(s) in "${activeVault.name}"…`);
+    say(`Running payroll: ${amountPerContractor} ${token} to each of ${contractors.length} contractor(s) in "${activeVault.name}"…`);
     let succeeded = 0;
     let failed = 0;
     const results = [];
-    for (const c of activeVault.contractors) {
+    for (const c of contractors) {
       try {
         if (wallet.isCircleWallet) {
           const tokenAddress = token === NATIVE_TOKEN_SYMBOL ? undefined : CONTRACTS[token];
@@ -2556,7 +2622,7 @@ function AgentPayrollPage({ wallet }) {
           message: text,
           context: {
             activeVaultName: activeVault?.name ?? null,
-            vaults: vaults.map((v) => ({ name: v.name, contractorCount: v.contractors.length })),
+            vaults: vaults.map((v) => ({ name: v.name, contractorCount: v.contractorCount })),
           },
         }),
       });
@@ -2665,7 +2731,7 @@ function AgentPayrollPage({ wallet }) {
                   onClick={() => { actionSwitchVault(v.id); setPendingForm(null); }}
                   className="w-full text-left px-3 py-2 rounded-lg bg-[var(--surface)] hover:bg-[var(--border-subtle)] text-[var(--text-primary)] text-sm"
                 >
-                  {v.name} · {v.contractors.length} contractor{v.contractors.length === 1 ? "" : "s"}
+                  {v.name} · {v.contractorCount} contractor{v.contractorCount === 1 ? "" : "s"}
                 </button>
               ))
             )}
@@ -2675,12 +2741,12 @@ function AgentPayrollPage({ wallet }) {
 
         {pendingForm?.type === "runPayroll" && (
           <div className="bg-[var(--surface-subtle)] rounded-xl p-4 space-y-3">
-            {!activeVault || activeVault.contractors.length === 0 ? (
+            {!activeVault || activeVault.contractorCount === 0 ? (
               <p className="text-rose-300 text-xs">Your active vault needs at least one contractor before you can run payroll.</p>
             ) : (
               <>
                 <p className="text-amber-300 text-xs">
-                  This pays {activeVault.contractors.length} contractor(s) in "{activeVault.name}" — real testnet USDC will move on-chain.
+                  This pays {activeVault.contractorCount} contractor(s) in "{activeVault.name}" — real testnet USDC will move on-chain.
                 </p>
                 <div className="flex gap-2">
                   <select
