@@ -21,6 +21,8 @@ import bridgeRoute from "./bridgeRoute.js";
 import offRampRoute from "./offRampRoute.js";
 import analyticsRoute from "./analyticsRoute.js";
 import payrollChatRoute from "./payrollChatRoute.js";
+import payrollRoute from "./payrollRoute.js";
+import { ensureSchema } from "./db.js";
 
 dotenv.config();
 
@@ -64,6 +66,7 @@ app.use("/api", bridgeRoute);
 app.use("/api", offRampRoute);
 app.use("/api", analyticsRoute);
 app.use("/api", payrollChatRoute);
+app.use("/api", payrollRoute);
 
 // Fallback error handler so a thrown error doesn't crash the process
 app.use((err, _req, res, _next) => {
@@ -72,6 +75,10 @@ app.use((err, _req, res, _next) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`Arclify backend running on http://localhost:${PORT}`);
-});
+ensureSchema()
+  .catch((err) => console.error("[db] Schema setup failed:", err.message))
+  .finally(() => {
+    app.listen(PORT, () => {
+      console.log(`Arclify backend running on http://localhost:${PORT}`);
+    });
+  });
