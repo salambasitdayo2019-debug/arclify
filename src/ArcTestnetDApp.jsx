@@ -5912,7 +5912,7 @@ export default function ArcTestnetDApp() {
       {mobileNavOpen && (
         <div className="sm:hidden fixed inset-0 z-50 flex" role="dialog" aria-modal="true" aria-label="Navigation menu">
           <div className="absolute inset-0 bg-black/60" onClick={() => setMobileNavOpen(false)} aria-hidden="true" />
-          <div className="relative z-10 w-72 max-w-[80%] h-full bg-[var(--surface)] border-r border-[var(--border-subtle)] p-4 overflow-y-auto">
+          <div className="relative z-10 w-72 max-w-[80%] h-full bg-[var(--bg-base)] border-r border-[var(--border-subtle)] p-4 overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <span className="text-[var(--text-primary)] font-semibold">Menu</span>
               <button
