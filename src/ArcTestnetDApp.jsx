@@ -5664,6 +5664,17 @@ export default function ArcTestnetDApp() {
   const auth = useAuth(wallet);
   const circleWallet = useCircleWallet();
   const [page, setPage] = useState("Dashboard");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [mobileNavOpen]);
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [page]);
   const [showLanding, setShowLanding] = useState(true);
   // Session checks usually resolve in well under a second — showing
   // "Loading…" immediately for those just adds a flash of black screen
