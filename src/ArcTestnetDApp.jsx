@@ -1789,12 +1789,12 @@ const NAV_ITEMS = [
   "Deposit",
   "Withdraw",
   "Agent Payroll",
+  "ArclifyUSD",
   "Transfer",
   "Bulk Transfer",
   "Swap",
   "Bridge",
   "Lending",
-  "ArclifyUSD",
   "NFT Lock",
   "Activity",
   "History",
@@ -2243,7 +2243,10 @@ function TransferPage({ wallet }) {
 
   return (
     <GlassCard className="p-6 max-w-lg">
-      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-4">Transfer</h2>
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-1">Transfer</h2>
+      <p className="text-[var(--text-muted)] text-xs mb-3">
+        Send USDC, EURC, or cirBTC to any wallet address on Arc Testnet — a normal on-chain transfer, confirmed in one step.
+      </p>
       {wallet.isCircleWallet && (
         <p className="text-cyan-300/70 text-xs mb-3">
           Circle Wallet: sending USDC, EURC, or cirBTC — you'll confirm with your PIN.
@@ -2332,7 +2335,10 @@ function BulkTransferPage({ wallet }) {
 
   return (
     <GlassCard className="p-6 max-w-2xl">
-      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-4">Bulk Transfer</h2>
+      <h2 className="text-[var(--text-primary)] text-lg font-semibold mb-1">Bulk Transfer</h2>
+      <p className="text-[var(--text-muted)] text-xs mb-4">
+        Same idea as Transfer, but for several recipients at once — paste a list of addresses and amounts, send them all in one pass.
+      </p>
       <select
         value={token}
         onChange={(e) => setToken(e.target.value)}
@@ -2699,7 +2705,10 @@ function AgentPayrollPage({ wallet }) {
     <GlassCard className="p-0 max-w-2xl overflow-hidden flex flex-col h-[560px]">
       <div className="px-5 py-4 border-b border-[var(--border-subtle)]">
         <h2 className="text-[var(--text-primary)] text-base font-semibold">Agent Payroll</h2>
-        <p className="text-[var(--text-faint)] text-xs mt-0.5">
+        <p className="text-[var(--text-muted)] text-xs mt-1">
+          Group contractors into a vault, then pay everyone at once — click the buttons below, or just type what you want. Anything that spends money always opens a confirmation form first, even if you typed it.
+        </p>
+        <p className="text-[var(--text-faint)] text-xs mt-1.5">
           {activeVault ? `Active vault: ${activeVault.name}` : "No active vault yet"}
         </p>
       </div>
@@ -5060,6 +5069,8 @@ function ThemeToggleButton({ theme, toggleTheme }) {
 const LANDING_FEATURES = [
   { label: "Deposit", glyph: "↓", grad: "from-cyan-400 to-cyan-600", desc: "Bring in testnet USDC/EURC via a real Paystack checkout — verified server-side, credited on-chain." },
   { label: "Withdraw", glyph: "↑", grad: "from-purple-400 to-purple-600", desc: "Move tokens out on-chain for real; the fiat payout leg is labeled as prototype." },
+  { label: "Agent Payroll", glyph: "⚙", grad: "from-cyan-400 to-teal-600", desc: "Chat-driven USDC payroll — create vaults, add contractors, run payroll for everyone at once. AI-assisted, but every payment needs your explicit confirmation." },
+  { label: "ArclifyUSD", glyph: "$", grad: "from-emerald-400 to-cyan-600", desc: "A real USDC-collateralized stablecoin — mint aUSD by depositing USDC, redeem anytime. Provably backed, checkable on-chain." },
   { label: "Transfer", glyph: "→", grad: "from-emerald-400 to-emerald-600", desc: "Send USDC, EURC, or cirBTC to any address, one at a time." },
   { label: "Bulk Transfer", glyph: "⇉", grad: "from-emerald-400 to-teal-600", desc: "Same transfer, batched — pay several addresses in one pass." },
   { label: "Swap", glyph: "⇄", grad: "from-orange-400 to-orange-600", desc: "Token-to-token swaps via Circle App Kit, with a live fee quote instead of a guess." },
@@ -5108,7 +5119,7 @@ function LandingPage({ onLaunch, theme, toggleTheme }) {
           A full DeFi stack, built to actually try out
         </h1>
         <p className="text-[var(--text-secondary)] text-base sm:text-lg mb-8 max-w-xl mx-auto">
-          Deposit, transfer, swap, bridge, lend, and lock — nine features, one dashboard,
+          Deposit, transfer, swap, bridge, lend, mint, and lock — ten features, one dashboard,
           all running on real infrastructure against Arc Testnet. Nothing to buy, nothing at risk.
         </p>
         <div className="flex flex-wrap items-center justify-center gap-3 mb-6">
@@ -5135,9 +5146,9 @@ function LandingPage({ onLaunch, theme, toggleTheme }) {
       <section className="px-4 sm:px-6 pb-16 max-w-4xl mx-auto">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           {[
-            { value: "9", label: "DeFi features" },
+            { value: "10", label: "DeFi features" },
             { value: "3", label: "Testnet chains via CCTP" },
-            { value: "3", label: "Verified contracts" },
+            { value: "4", label: "Verified contracts" },
             { value: "0", label: "Real funds at risk" },
           ].map((s) => (
             <GlassCard key={s.label} className="p-5 text-center">
@@ -5152,7 +5163,7 @@ function LandingPage({ onLaunch, theme, toggleTheme }) {
       <section id="landing-features" className="px-4 sm:px-6 pb-16 max-w-5xl mx-auto">
         <div className="text-center mb-10">
           <p className="text-cyan-300 text-xs font-semibold uppercase tracking-wide mb-2">Everything you need</p>
-          <h2 className="text-[var(--text-primary)] text-3xl font-bold tracking-tight mb-3">One dashboard, nine features</h2>
+          <h2 className="text-[var(--text-primary)] text-3xl font-bold tracking-tight mb-3">One dashboard, ten features</h2>
           <p className="text-[var(--text-secondary)] text-sm max-w-lg mx-auto">
             Every feature below is wired to real Circle infrastructure and real deployed
             contracts — this isn't a mockup of a DeFi app, it's a working one on testnet.
@@ -5491,6 +5502,8 @@ const TOUR_SEEN_KEY = "arclify_tour_seen";
 const TOUR_STEPS = [
   { title: "Deposit", body: "Fund your wallet with Naira, Shillings, or Cedis — real Paystack checkout for NGN, converted straight to USDC/EURC." },
   { title: "Withdraw", body: "Cash out USDC/EURC — your tokens genuinely move on-chain, verifiable on Arcscan." },
+  { title: "Agent Payroll", body: "Create a payroll vault, add contractors, and pay everyone at once — click buttons, or just type what you want in plain English. Every payment still needs your explicit confirmation before anything moves." },
+  { title: "ArclifyUSD", body: "A real stablecoin, not just a token with a name — deposit USDC to mint aUSD 1:1, redeem anytime for USDC back. The contract's backing is checkable on-chain, not just claimed." },
   { title: "Transfer & Bulk Transfer", body: "Send native USDC, EURC, or cirBTC — one at a time or in a batch." },
   { title: "Swap", body: "Trade between stablecoins, routed through on-chain liquidity via Circle App Kit." },
   { title: "Bridge", body: "Move USDC in from Ethereum Sepolia, Base Sepolia, or Avalanche Fuji — a real CCTP burn-and-mint, not a wrapped asset." },
