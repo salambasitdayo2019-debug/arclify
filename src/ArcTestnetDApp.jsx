@@ -5890,14 +5890,66 @@ export default function ArcTestnetDApp() {
         </div>
       )}
 
+      {/* Mobile: compact bar showing where you are, opens a full nav drawer.
+          Replaces what used to be a horizontal-scroll row of pills — that
+          worked fine at 7 nav items, but scrolling through 14 of them to
+          find "Wallet Profile" at the end is real friction a drawer avoids. */}
+      <div className="sm:hidden flex items-center gap-2 px-4 py-3 border-b border-[var(--border-subtle)]">
+        <button
+          onClick={() => setMobileNavOpen(true)}
+          aria-label="Open navigation menu"
+          className="flex items-center gap-2 text-[var(--text-primary)] text-sm font-medium"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+            <line x1="3" y1="6" x2="21" y2="6" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <line x1="3" y1="18" x2="21" y2="18" />
+          </svg>
+          {page}
+        </button>
+      </div>
+
+      {mobileNavOpen && (
+        <div className="sm:hidden fixed inset-0 z-50 flex" role="dialog" aria-modal="true" aria-label="Navigation menu">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setMobileNavOpen(false)} aria-hidden="true" />
+          <div className="relative z-10 w-72 max-w-[80%] h-full bg-[var(--surface)] border-r border-[var(--border-subtle)] p-4 overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-[var(--text-primary)] font-semibold">Menu</span>
+              <button
+                onClick={() => setMobileNavOpen(false)}
+                aria-label="Close navigation menu"
+                className="text-[var(--text-muted)] hover:text-[var(--text-soft)] text-xl leading-none px-1"
+              >
+                ✕
+              </button>
+            </div>
+            <nav className="space-y-1">
+              {NAV_ITEMS.map((item) => (
+                <button
+                  key={item}
+                  onClick={() => setPage(item)}
+                  className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition ${
+                    page === item
+                      ? "bg-[var(--surface-subtle)] text-[var(--text-primary)] font-medium"
+                      : "text-[var(--text-secondary)] hover:text-[var(--text-strong)] hover:bg-[var(--surface-subtle)]"
+                  }`}
+                >
+                  {item}
+                </button>
+              ))}
+            </nav>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row">
-        {/* Horizontal scrollable pill nav on mobile; vertical sidebar from sm breakpoint up */}
-        <nav className="flex sm:flex-col gap-1 overflow-x-auto sm:overflow-visible whitespace-nowrap sm:whitespace-normal p-3 sm:p-4 sm:w-48 sm:shrink-0 sm:space-y-1 border-b sm:border-b-0 border-[var(--border-subtle)]">
+        {/* Desktop: vertical sidebar, unchanged from before */}
+        <nav className="hidden sm:flex sm:flex-col gap-1 p-4 sm:w-48 sm:shrink-0 sm:space-y-1 border-[var(--border-subtle)]">
           {NAV_ITEMS.map((item) => (
             <button
               key={item}
               onClick={() => setPage(item)}
-              className={`shrink-0 sm:w-full text-left px-3 py-2 rounded-lg text-sm transition ${
+              className={`w-full text-left px-3 py-2 rounded-lg text-sm transition ${
                 page === item
                   ? "bg-[var(--surface)] text-[var(--text-primary)]"
                   : "text-[var(--text-secondary)] hover:text-[var(--text-strong)] hover:bg-[var(--surface-subtle)]"
