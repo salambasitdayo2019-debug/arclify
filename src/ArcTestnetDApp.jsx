@@ -77,6 +77,18 @@ const CONTRACTS = {
 
 const LENDING_POOL_ADDRESS = "0x63F38a7cf59BcC8FBaB11D4F84747ae0b9357267";
 
+// ArclifyUSD (aUSD) — a USDC-collateralized testnet stablecoin. Deposit
+// USDC, mint aUSD 1:1; burn aUSD, get USDC back 1:1. Uses the same USDC
+// ERC-20 interface (CONTRACTS.USDC) Lending already treats as collateral.
+const ARCLIFY_USD_ADDRESS = "0xFA9b703d1EE9d7E5D6203A94137c2e3CbBeeB201";
+const ARCLIFY_USD_ABI = [
+  "function mint(uint256 amount)",
+  "function redeem(uint256 amount)",
+  "function balanceOf(address account) view returns (uint256)",
+  "function totalSupply() view returns (uint256)",
+  "function collateralBalance() view returns (uint256)",
+];
+
 // Circle stablecoins (USDC, EURC) always use 6 decimals — hardcoding this
 // avoids an extra RPC round trip per token, which matters on Arc Testnet's
 // rate-limited public RPC. cirBTC follows standard Bitcoin/WBTC precision
@@ -294,6 +306,48 @@ async function lendingCall(wallet, { functionSignature, functionParams }) {
 }
 /*   capability for NFT locks or leaderboards, so those stay custom.)  */
 /* ------------------------------------------------------------------ */
+
+// Deposit USDC, mint aUSD 1:1 — same two-step approve-then-call pattern
+// Lending's depositCollateral already uses.
+async function arclifyUsdMint(wallet, amountUnits) {
+  if (wallet.isCircleWallet) {
+    await wallet.circleExecuteContract({
+      contractAddress: CONTRACTS.USDC,
+      abiFunctionSignature: "approve(address,uint256)",
+      abiParameters: [ARCLIFY_USD_ADDRESS, String(amountUnits)],
+    });
+    await wallet.circleExecuteContract({
+      contractAddress: ARCLIFY_USD_ADDRESS,
+      abiFunctionSignature: "mint(uint256)",
+      abiParameters: [String(amountUnits)],
+    });
+  } else {
+    const signer = await wallet.provider.getSigner();
+    const usdc = new ethers.Contract(CONTRACTS.USDC, LENDING_ERC20_ABI, signer);
+    const approveTx = await withRpcRetry(() => usdc.approve(ARCLIFY_USD_ADDRESS, amountUnits));
+    await withRpcRetry(() => approveTx.wait());
+    const ausd = new ethers.Contract(ARCLIFY_USD_ADDRESS, ARCLIFY_USD_ABI, signer);
+    const tx = await withRpcRetry(() => ausd.mint(amountUnits));
+    await withRpcRetry(() => tx.wait());
+  }
+}
+
+// Burn aUSD, get USDC back — no approval needed here, since the
+// contract is sending TO the user rather than pulling FROM them.
+async function arclifyUsdRedeem(wallet, amountUnits) {
+  if (wallet.isCircleWallet) {
+    await wallet.circleExecuteContract({
+      contractAddress: ARCLIFY_USD_ADDRESS,
+      abiFunctionSignature: "redeem(uint256)",
+      abiParameters: [String(amountUnits)],
+    });
+  } else {
+    const signer = await wallet.provider.getSigner();
+    const ausd = new ethers.Contract(ARCLIFY_USD_ADDRESS, ARCLIFY_USD_ABI, signer);
+    const tx = await withRpcRetry(() => ausd.redeem(amountUnits));
+    await withRpcRetry(() => tx.wait());
+  }
+}
 
 const LS_KEYS = {
   txs: "arc_txs",
@@ -1740,6 +1794,7 @@ const NAV_ITEMS = [
   "Swap",
   "Bridge",
   "Lending",
+  "ArclifyUSD",
   "NFT Lock",
   "Activity",
   "History",
@@ -3669,6 +3724,172 @@ function LendingPage({ wallet }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Page: ArclifyUSD (aUSD) — USDC-collateralized testnet stablecoin    */
+/*  mint()/redeem() are atomic 1:1 swaps with USDC, so the contract is  */
+/*  always fully backed by construction — collateralBalance() lets      */
+/*  anyone verify that on-chain rather than just trusting a claim.      */
+/* ------------------------------------------------------------------ */
+
+function ArclifyUSDPage({ wallet }) {
+  const [myBalance, setMyBalance] = useState(null);
+  const [totalSupply, setTotalSupply] = useState(null);
+  const [collateral, setCollateral] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const [mintAmount, setMintAmount] = useState("");
+  const [redeemAmount, setRedeemAmount] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [lastSynced, setLastSynced] = useState(null);
+
+  const loadData = useCallback(async () => {
+    const provider = wallet.provider || readOnlyProvider;
+    const ausd = new ethers.Contract(ARCLIFY_USD_ADDRESS, ARCLIFY_USD_ABI, provider);
+    try {
+      const [supply, coll, mine] = await Promise.all([
+        withRpcRetry(() => ausd.totalSupply()),
+        withRpcRetry(() => ausd.collateralBalance()),
+        wallet.address ? withRpcRetry(() => ausd.balanceOf(wallet.address)) : Promise.resolve(0n),
+      ]);
+      setTotalSupply(ethers.formatUnits(supply, STABLECOIN_DECIMALS));
+      setCollateral(ethers.formatUnits(coll, STABLECOIN_DECIMALS));
+      setMyBalance(ethers.formatUnits(mine, STABLECOIN_DECIMALS));
+      setLoadError(null);
+      setLastSynced(Date.now());
+    } catch (e) {
+      console.warn("Failed to load ArclifyUSD data:", e);
+      setLoadError(e.shortMessage || e.message || "Failed to load ArclifyUSD data.");
+    }
+  }, [wallet.provider, wallet.address, refreshKey]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const refresh = () => setRefreshKey((k) => k + 1);
+
+  const handleMint = useCallback(async () => {
+    if (!wallet.address) {
+      toast({ category: "ArclifyUSD", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
+      return;
+    }
+    if (!mintAmount || Number(mintAmount) <= 0) return;
+    setBusy(true);
+    try {
+      const amountUnits = ethers.parseUnits(mintAmount, STABLECOIN_DECIMALS);
+      await arclifyUsdMint(wallet, amountUnits);
+      toast({ category: "ArclifyUSD", tone: "ok", title: "aUSD minted", message: `${mintAmount} USDC deposited, ${mintAmount} aUSD received.` });
+      setMintAmount("");
+      refresh();
+    } catch (e) {
+      toast({ category: "ArclifyUSD", tone: "bad", title: "Mint failed", message: e.shortMessage || e.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [wallet, mintAmount]);
+
+  const handleRedeem = useCallback(async () => {
+    if (!redeemAmount || Number(redeemAmount) <= 0) return;
+    setBusy(true);
+    try {
+      const amountUnits = ethers.parseUnits(redeemAmount, STABLECOIN_DECIMALS);
+      await arclifyUsdRedeem(wallet, amountUnits);
+      toast({ category: "ArclifyUSD", tone: "ok", title: "aUSD redeemed", message: `${redeemAmount} aUSD burned, ${redeemAmount} USDC returned.` });
+      setRedeemAmount("");
+      refresh();
+    } catch (e) {
+      toast({ category: "ArclifyUSD", tone: "bad", title: "Redeem failed", message: e.shortMessage || e.message });
+    } finally {
+      setBusy(false);
+    }
+  }, [wallet, redeemAmount]);
+
+  const fullyBacked = totalSupply !== null && collateral !== null && Number(collateral) >= Number(totalSupply);
+
+  return (
+    <GlassCard className="p-6 max-w-2xl">
+      <div className="flex items-start justify-between gap-3 mb-1">
+        <h2 className="text-[var(--text-primary)] text-lg font-semibold">ArclifyUSD (aUSD)</h2>
+        <div className="text-right shrink-0">
+          <button
+            onClick={refresh}
+            className="text-[var(--text-muted)] text-xs hover:text-[var(--text-soft)] underline decoration-dotted"
+          >
+            Refresh
+          </button>
+          {lastSynced && (
+            <p className="text-[var(--text-faint)] text-[10px] mt-0.5">Last synced {relativeTime(lastSynced)}</p>
+          )}
+        </div>
+      </div>
+      <p className="text-[var(--text-muted)] text-xs mb-4">
+        A USDC-collateralized testnet stablecoin — deposit USDC, mint aUSD 1:1; burn aUSD, get USDC back 1:1. No free minting, no algorithmic peg — just a real vault. Contract:{" "}
+        <span className="font-mono">{ARCLIFY_USD_ADDRESS.slice(0, 10)}…</span>
+      </p>
+
+      {loadError && (
+        <p className="mb-4 text-xs text-rose-300 bg-rose-950/40 border border-rose-500/30 rounded-lg p-3">{loadError}</p>
+      )}
+
+      <div className="grid grid-cols-2 gap-3 mb-3 text-sm">
+        <div className="bg-[var(--surface-subtle)] rounded-lg p-3">
+          <p className="text-[var(--text-muted)] text-xs mb-2">Your aUSD balance</p>
+          {myBalance === null ? <Skeleton className="h-5 w-20" /> : (
+            <p className="text-[var(--text-primary)] font-medium">{Number(myBalance).toFixed(4)} aUSD</p>
+          )}
+        </div>
+        <div className="bg-[var(--surface-subtle)] rounded-lg p-3">
+          <p className="text-[var(--text-muted)] text-xs mb-2">Total aUSD supply</p>
+          {totalSupply === null ? <Skeleton className="h-5 w-20" /> : (
+            <p className="text-[var(--text-primary)] font-medium">{Number(totalSupply).toFixed(4)} aUSD</p>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-[var(--surface-subtle)] rounded-lg p-3 mb-5 text-sm flex items-center justify-between">
+        <div>
+          <p className="text-[var(--text-muted)] text-xs mb-1">USDC held in the contract (proof of backing)</p>
+          {collateral === null ? <Skeleton className="h-5 w-24" /> : (
+            <p className="text-[var(--text-primary)] font-medium">{Number(collateral).toFixed(4)} USDC</p>
+          )}
+        </div>
+        {totalSupply !== null && collateral !== null && (
+          <Pill tone={fullyBacked ? "ok" : "bad"}>{fullyBacked ? "Fully backed" : "Under-collateralized"}</Pill>
+        )}
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-4">
+        <div>
+          <label className="text-[var(--text-secondary)] text-xs">Mint aUSD (deposit USDC)</label>
+          <input
+            value={mintAmount}
+            onChange={(e) => setMintAmount(e.target.value)}
+            placeholder="0.00"
+            disabled={busy}
+            className="w-full mt-1 mb-2 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm disabled:opacity-50"
+          />
+          <PrimaryButton disabled={busy || !mintAmount} onClick={handleMint} className="w-full">
+            Mint
+          </PrimaryButton>
+        </div>
+        <div>
+          <label className="text-[var(--text-secondary)] text-xs">Redeem aUSD (get USDC back)</label>
+          <input
+            value={redeemAmount}
+            onChange={(e) => setRedeemAmount(e.target.value)}
+            placeholder="0.00"
+            disabled={busy}
+            className="w-full mt-1 mb-2 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg px-3 py-2 text-[var(--text-primary)] text-sm disabled:opacity-50"
+          />
+          <PrimaryButton disabled={busy || !redeemAmount} onClick={handleRedeem} className="w-full">
+            Redeem
+          </PrimaryButton>
+        </div>
+      </div>
+    </GlassCard>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Page: Off-Ramp (PROTOTYPE) — USDC/EURC -> local currency payout     */
 /*                                                                      */
 /*  Two genuinely different halves, and it matters that they're kept    */
@@ -5533,6 +5754,7 @@ export default function ArcTestnetDApp() {
       case "Swap": return <SwapPage wallet={effectiveWallet} />;
       case "Bridge": return <BridgePage wallet={effectiveWallet} />;
       case "Lending": return <LendingPage wallet={effectiveWallet} />;
+      case "ArclifyUSD": return <ArclifyUSDPage wallet={effectiveWallet} />;
       case "Deposit": return <DepositPage wallet={effectiveWallet} />;
       case "Withdraw": return <OffRampPage wallet={effectiveWallet} />;
       case "NFT Lock": return <NFTLockPage wallet={effectiveWallet} />;
