@@ -2297,25 +2297,36 @@ function BulkTransferPage({ wallet }) {
     setRows((r) => r.map((row, idx) => (idx === i ? { ...row, [field]: val } : row)));
 
   const runBatch = useCallback(async () => {
-    if (!wallet.provider) {
+    if (!wallet.isCircleWallet && !wallet.provider) {
       toast({ category: "Bulk Transfer", tone: "bad", title: "Not connected", message: "Connect your wallet first." });
       return;
     }
-    const signer = await wallet.provider.getSigner();
     const isNative = token === NATIVE_TOKEN_SYMBOL;
-    const contract = isNative ? null : new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
     const decimals = isNative ? NATIVE_BALANCE_DECIMALS : TOKEN_DECIMALS[token];
+    let signer, contract;
+    if (!wallet.isCircleWallet) {
+      signer = await wallet.provider.getSigner();
+      contract = isNative ? null : new ethers.Contract(CONTRACTS[token], ERC20_ABI, signer);
+    }
     const results = [];
     let succeeded = 0;
     let failed = 0;
     for (const row of rows) {
       if (!ethers.isAddress(row.to) || !row.amount) continue;
       try {
-        const tx = isNative
-          ? await signer.sendTransaction({ to: row.to, value: ethers.parseUnits(row.amount, decimals) })
-          : await contract.transfer(row.to, ethers.parseUnits(row.amount, decimals));
-        await tx.wait();
-        results.push(`✓ ${row.amount} ${token} → ${row.to.slice(0, 10)}… (${tx.hash.slice(0, 10)}…)`);
+        if (wallet.isCircleWallet) {
+          // Same per-recipient loop Agent Payroll's "Run payroll for all"
+          // already uses — each send gets its own normal PIN confirmation,
+          // rather than one confirmation covering the whole batch.
+          const tokenAddress = isNative ? undefined : CONTRACTS[token];
+          await wallet.circleSendTransfer({ to: row.to, amount: row.amount, tokenAddress });
+        } else {
+          const tx = isNative
+            ? await signer.sendTransaction({ to: row.to, value: ethers.parseUnits(row.amount, decimals) })
+            : await contract.transfer(row.to, ethers.parseUnits(row.amount, decimals));
+          await tx.wait();
+        }
+        results.push(`✓ ${row.amount} ${token} → ${row.to.slice(0, 10)}…`);
         succeeded++;
       } catch (e) {
         results.push(`✗ ${row.to.slice(0, 10)}… failed: ${e.shortMessage || e.message}`);
@@ -2331,7 +2342,7 @@ function BulkTransferPage({ wallet }) {
     });
   }, [wallet, rows, token]);
 
-  if (wallet.isCircleWallet) return <CirclePhase2Notice feature="Bulk Transfer" />;
+  if (wallet.isCircleWallet && !wallet.circleSendTransfer) return <CirclePhase2Notice feature="Bulk Transfer" />;
 
   return (
     <GlassCard className="p-6 max-w-2xl">
